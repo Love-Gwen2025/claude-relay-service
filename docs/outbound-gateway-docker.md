@@ -1,11 +1,11 @@
-# Outbound Gateway Docker Notes
+# 出网网关 Docker 说明
 
-- **Env flags (app container)**  
+- **应用容器环境变量**  
   - `OUTBOUND_GATEWAY_ENABLED=true`  
-  - `OUTBOUND_GATEWAY_URL=http://gateway:8080/proxy` (use service name if on same Docker network)  
-  - `OUTBOUND_GATEWAY_FORWARD_PROXY_HEADER=true` (default) to pass account proxy as `x-proxy-url`
+  - `OUTBOUND_GATEWAY_URL=http://gateway:8080/proxy`（同一 Docker 网络内用服务名 gateway）  
+  - `OUTBOUND_GATEWAY_FORWARD_PROXY_HEADER=true`（默认）将账户代理写入 `x-proxy-url`
 
-- **Compose example (sidecar + app)**  
+- **Compose 示例（侧车 + 主应用）**  
   ```yaml
   services:
     gateway:
@@ -20,18 +20,18 @@
         OUTBOUND_GATEWAY_ENABLED: "true"
         OUTBOUND_GATEWAY_URL: "http://gateway:8080/proxy"
         OUTBOUND_GATEWAY_FORWARD_PROXY_HEADER: "true"
-      # mount config/.env/redis/etc as your deployment requires
+      # 视情况挂载 config/.env/redis 等
   ```
 
-- **Container networking tips**  
-  - In Docker, `127.0.0.1` is the container itself; use the service name (`gateway`) for cross-container traffic.  
-  - Keep the two services on the same user-defined network for name resolution and stable connectivity.  
-  - If you bind gateway to the host (`8080:8080`) and run app on the host, set URL to `http://127.0.0.1:8080/proxy`.
+- **网络提示**  
+  - Docker 内 `127.0.0.1` 仅指向容器自身，跨容器请用服务名 `gateway`。  
+  - 让两服务处于同一自定义网络，便于解析和稳定连通。  
+  - 若侧车映射到宿主机 (`8080:8080`) 且应用也跑在宿主机，URL 可设为 `http://127.0.0.1:8080/proxy`。  
   - CI 构建：`.github/workflows/docker-build.yml` 会同时构建/推送 `claude-relay-service` 与 `claude-relay-gateway` 两个镜像（latest + sha 标签）。
 
-- **Health & timeout**  
-  - App respects `REQUEST_TIMEOUT` (default 600s) for gateway calls; ensure gateway timeout is ≥ app timeout.  
-  - Consider adding a lightweight `/health` endpoint in the gateway and a `healthcheck` in Compose.
+- **健康检查与超时**  
+  - 应用侧调用网关受 `REQUEST_TIMEOUT`（默认 600s）约束，建议网关超时不小于该值。  
+  - 可在网关加简单 `/health` 接口，并在 Compose 中配置 `healthcheck`。
 
-- **Proxy forwarding**  
-  - Account-level proxies are serialized to `x-proxy-url`; set `OUTBOUND_GATEWAY_FORWARD_PROXY_HEADER=false` to disable if not needed.
+- **代理透传**  
+  - 账户级代理会序列化到 `x-proxy-url` 头；若不需要可设 `OUTBOUND_GATEWAY_FORWARD_PROXY_HEADER=false` 禁用。
