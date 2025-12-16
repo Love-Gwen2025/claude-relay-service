@@ -11,6 +11,7 @@ env:
   REGISTRY: ghcr.io
   # 自动获取当前仓库名 (格式: 用户名/项目名)
   IMAGE_NAME: love-gwen2025/claude-relay-service
+  GATEWAY_IMAGE_NAME: love-gwen2025/claude-relay-gateway
 
 jobs:
   build-and-push:
@@ -46,6 +47,15 @@ jobs:
             type=raw,value=latest
             type=sha,format=long
 
+      - name: Extract metadata (tags, labels) for Gateway Docker
+        id: meta-gateway
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.GATEWAY_IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=long
+
       # 6. 构建并推送
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -54,5 +64,16 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push Gateway Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./gateway
+          file: ./gateway/Dockerfile
+          push: true
+          tags: ${{ steps.meta-gateway.outputs.tags }}
+          labels: ${{ steps.meta-gateway.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
