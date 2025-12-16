@@ -3,7 +3,7 @@ name: Build and Publish Docker
 # 1. 触发条件
 on:
   push:
-    branches: [ "dev-custom" ] # <--- 确认这里是你正在使用的分支名
+    branches: [ "dev_custom" ] # <--- 确认这里是你正在使用的分支名
     # tags: [ "v*.*.*" ]
 
 # 2. 全局环境变量 (这里定义了，下面的 steps 才能引用，否则报黄线)
