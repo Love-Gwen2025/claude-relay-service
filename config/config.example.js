@@ -101,6 +101,16 @@ const config = {
     useIPv4: process.env.PROXY_USE_IPV4 !== 'false' // 默认 true，只有明确设置为 'false' 才使用 IPv6
   },
 
+  // 🛡️ 出网指纹网关（可选）
+  outboundGateway: {
+    enabled:
+      process.env.OUTBOUND_GATEWAY_ENABLED === '1' ||
+      process.env.OUTBOUND_GATEWAY_ENABLED === 'true',
+    url: process.env.OUTBOUND_GATEWAY_URL || 'http://127.0.0.1:8080/proxy',
+    // 是否把上游代理信息通过 x-proxy-url 传给网关
+    forwardProxyHeader: process.env.OUTBOUND_GATEWAY_FORWARD_PROXY_HEADER !== 'false'
+  },
+
   // ⏱️ 请求超时配置
   requestTimeout: parseInt(process.env.REQUEST_TIMEOUT) || 600000, // 默认 10 分钟
 

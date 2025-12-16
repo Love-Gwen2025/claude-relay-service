@@ -7,6 +7,7 @@ const apiKeyService = require('./apiKeyService')
 const unifiedOpenAIScheduler = require('./unifiedOpenAIScheduler')
 const config = require('../../config/config')
 const crypto = require('crypto')
+const gatewayClient = require('../utils/gatewayClient')
 
 // 抽取缓存写入 token，兼容多种字段命名
 function extractCacheCreationTokens(usageData) {
@@ -104,8 +105,10 @@ class OpenAIResponsesRelayService {
         signal: abortController.signal
       }
 
+      const useGateway = gatewayClient.shouldUseGateway()
+
       // 配置代理（如果有）
-      if (fullAccount.proxy) {
+      if (!useGateway && fullAccount.proxy) {
         const proxyAgent = ProxyHelper.createProxyAgent(fullAccount.proxy)
         if (proxyAgent) {
           requestOptions.httpAgent = proxyAgent
@@ -129,7 +132,18 @@ class OpenAIResponsesRelayService {
       })
 
       // 发送请求
-      const response = await axios(requestOptions)
+      const response = useGateway
+        ? await gatewayClient.forward({
+            targetUrl,
+            method: req.method,
+            headers,
+            data: req.body,
+            responseType: req.body?.stream ? 'stream' : 'json',
+            timeout: this.defaultTimeout,
+            signal: abortController.signal,
+            proxyConfig: fullAccount.proxy
+          })
+        : await axios(requestOptions)
 
       // 处理 429 限流错误
       if (response.status === 429) {

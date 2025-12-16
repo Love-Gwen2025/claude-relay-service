@@ -8,6 +8,7 @@ const redis = require('../models/redis')
 const { updateRateLimitCounters } = require('../utils/rateLimitHelper')
 const logger = require('../utils/logger')
 const runtimeAddon = require('../utils/runtimeAddon')
+const gatewayClient = require('../utils/gatewayClient')
 
 const SYSTEM_PROMPT = 'You are Droid, an AI software engineering agent built by Factory.'
 const RUNTIME_EVENT_FMT_PAYLOAD = 'fmtPayload'
@@ -305,7 +306,8 @@ class DroidRelayService {
           clientApiKeyId
         )
       } else {
-        // 非流式响应：使用 axios
+        // 非流式响应：使用 axios 或网关
+        const useGateway = gatewayClient.shouldUseGateway()
         const requestOptions = {
           method: 'POST',
           url: apiUrl,
@@ -313,14 +315,26 @@ class DroidRelayService {
           data: processedBody,
           timeout: 600 * 1000, // 10分钟超时
           responseType: 'json',
-          ...(proxyAgent && {
-            httpAgent: proxyAgent,
-            httpsAgent: proxyAgent,
-            proxy: false
-          })
+          ...(!useGateway && proxyAgent
+            ? {
+                httpAgent: proxyAgent,
+                httpsAgent: proxyAgent,
+                proxy: false
+              }
+            : {})
         }
 
-        const response = await axios(requestOptions)
+        const response = useGateway
+          ? await gatewayClient.forward({
+              targetUrl: apiUrl,
+              method: 'POST',
+              headers,
+              data: processedBody,
+              responseType: 'json',
+              timeout: 600 * 1000,
+              proxyConfig: account?.proxy
+            })
+          : await axios(requestOptions)
 
         logger.info(`✅ Factory.ai response status: ${response.status}`)
 
@@ -498,7 +512,7 @@ class DroidRelayService {
         timeout: 600 * 1000
       }
 
-      const req = https.request(options, (res) => {
+      const handleUpstreamResponse = (res) => {
         upstreamResponse = res
         logger.info(`✅ Factory.ai stream response status: ${res.statusCode}`)
 
@@ -634,6 +648,35 @@ class DroidRelayService {
             handleStreamError(new Error('Upstream stream closed unexpectedly'))
           }
         })
+      }
+
+      if (gatewayClient.shouldUseGateway()) {
+        gatewayClient
+          .forward({
+            targetUrl: apiUrl,
+            method: 'POST',
+            headers: requestHeaders,
+            data: bodyString,
+            responseType: 'stream',
+            timeout: 600 * 1000,
+            proxyConfig: account?.proxy
+          })
+          .then((gatewayResponse) => {
+            const res = gatewayResponse?.data
+            if (!res || typeof res.on !== 'function') {
+              rejectOnce(new Error('Invalid gateway stream response'))
+              return
+            }
+            res.statusCode = gatewayResponse.status
+            res.headers = gatewayResponse.headers || {}
+            handleUpstreamResponse(res)
+          })
+          .catch(rejectOnce)
+        return
+      }
+
+      const req = https.request(options, (res) => {
+        handleUpstreamResponse(res)
       })
 
       // 客户端断开连接时清理

@@ -1,0 +1,55 @@
+name: Build and Publish Docker
+
+# 1. 触发条件
+on:
+  push:
+    branches: [ "dev-custom" ] # <--- 确认这里是你正在使用的分支名
+    # tags: [ "v*.*.*" ]
+
+# 2. 全局环境变量 (这里定义了，下面的 steps 才能引用，否则报黄线)
+env:
+  REGISTRY: ghcr.io
+  # 自动获取当前仓库名 (格式: 用户名/项目名)
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    # 3. 权限设置 (关键：没有这个权限，GITHUB_TOKEN 无法上传镜像)
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 4. 登录 (引用上面的 env.REGISTRY)
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 5. 生成元数据 (引用上面的 env.IMAGE_NAME)
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=long
+
+      # 6. 构建并推送
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

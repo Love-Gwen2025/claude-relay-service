@@ -3,6 +3,7 @@ const ProxyHelper = require('../utils/proxyHelper')
 const logger = require('../utils/logger')
 const config = require('../../config/config')
 const apiKeyService = require('./apiKeyService')
+const gatewayClient = require('../utils/gatewayClient')
 
 // Gemini API 配置
 const GEMINI_API_BASE = 'https://cloudcode.googleapis.com/v1'
@@ -254,6 +255,7 @@ async function sendGeminiRequest({
   }
 
   // 配置请求选项
+  const useGateway = gatewayClient.shouldUseGateway()
   let apiUrl
   if (projectId) {
     // 使用项目特定的 URL 格式（Google Cloud/Workspace 账号）
@@ -278,13 +280,15 @@ async function sendGeminiRequest({
 
   // 添加代理配置
   const proxyAgent = createProxyAgent(proxy)
-  if (proxyAgent) {
-    // 只设置 httpsAgent，因为目标 URL 是 HTTPS (cloudcode.googleapis.com)
-    axiosConfig.httpsAgent = proxyAgent
-    axiosConfig.proxy = false
-    logger.info(`🌐 Using proxy for Gemini API request: ${ProxyHelper.getProxyDescription(proxy)}`)
-  } else {
-    logger.debug('🌐 No proxy configured for Gemini API request')
+  if (!useGateway) {
+    if (proxyAgent) {
+      // 只设置 httpsAgent，因为目标 URL 是 HTTPS (cloudcode.googleapis.com)
+      axiosConfig.httpsAgent = proxyAgent
+      axiosConfig.proxy = false
+      logger.info(`🌐 Using proxy for Gemini API request: ${ProxyHelper.getProxyDescription(proxy)}`)
+    } else {
+      logger.debug('🌐 No proxy configured for Gemini API request')
+    }
   }
 
   // 添加 AbortController 信号支持
@@ -299,7 +303,18 @@ async function sendGeminiRequest({
 
   try {
     logger.debug('Sending request to Gemini API')
-    const response = await axios(axiosConfig)
+    const response = useGateway
+      ? await gatewayClient.forward({
+          targetUrl: apiUrl,
+          method: 'POST',
+          headers: axiosConfig.headers,
+          data: requestBody,
+          responseType: stream ? 'stream' : 'json',
+          timeout: config.requestTimeout || 600000,
+          signal,
+          proxyConfig: proxy
+        })
+      : await axios(axiosConfig)
 
     if (stream) {
       return handleStreamResponse(response, model, apiKeyId, accountId)

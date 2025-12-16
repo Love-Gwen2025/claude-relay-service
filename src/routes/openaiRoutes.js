@@ -12,6 +12,7 @@ const apiKeyService = require('../services/apiKeyService')
 const crypto = require('crypto')
 const ProxyHelper = require('../utils/proxyHelper')
 const { updateRateLimitCounters } = require('../utils/rateLimitHelper')
+const gatewayClient = require('../utils/gatewayClient')
 
 // 创建代理 Agent（使用统一的代理工具）
 function createProxyAgent(proxy) {
@@ -334,6 +335,7 @@ const handleResponses = async (req, res) => {
 
     // 创建代理 agent
     const proxyAgent = createProxyAgent(proxy)
+    const useGateway = gatewayClient.shouldUseGateway()
 
     // 配置请求选项
     const axiosConfig = {
@@ -342,14 +344,18 @@ const handleResponses = async (req, res) => {
       validateStatus: () => true
     }
 
-    // 如果有代理，添加代理配置
-    if (proxyAgent) {
-      axiosConfig.httpAgent = proxyAgent
-      axiosConfig.httpsAgent = proxyAgent
-      axiosConfig.proxy = false
-      logger.info(`🌐 Using proxy for OpenAI request: ${ProxyHelper.getProxyDescription(proxy)}`)
-    } else {
-      logger.debug('🌐 No proxy configured for OpenAI request')
+    // 如果有代理，添加代理配置（非网关模式）
+    if (!useGateway) {
+      if (proxyAgent) {
+        axiosConfig.httpAgent = proxyAgent
+        axiosConfig.httpsAgent = proxyAgent
+        axiosConfig.proxy = false
+        logger.info(
+          `🌐 Using proxy for OpenAI request: ${ProxyHelper.getProxyDescription(proxy)}`
+        )
+      } else {
+        logger.debug('🌐 No proxy configured for OpenAI request')
+      }
     }
 
     const codexEndpoint = isCompactRoute
@@ -359,16 +365,39 @@ const handleResponses = async (req, res) => {
     // 根据 stream 参数决定请求类型
     if (isStream) {
       // 流式请求
-      upstream = await axios.post(codexEndpoint, req.body, {
-        ...axiosConfig,
-        responseType: 'stream'
-      })
+      upstream = useGateway
+        ? await gatewayClient.forward({
+            targetUrl: codexEndpoint,
+            method: 'POST',
+            headers,
+            data: req.body,
+            responseType: 'stream',
+            timeout: config.requestTimeout || 600000,
+            proxyConfig: proxy
+          })
+        : await axios.post(codexEndpoint, req.body, {
+            ...axiosConfig,
+            responseType: 'stream'
+          })
     } else {
       // 非流式请求
-      upstream = await axios.post(codexEndpoint, req.body, axiosConfig)
+      upstream = useGateway
+        ? await gatewayClient.forward({
+            targetUrl: codexEndpoint,
+            method: 'POST',
+            headers,
+            data: req.body,
+            responseType: 'json',
+            timeout: config.requestTimeout || 600000,
+            proxyConfig: proxy
+          })
+        : await axios.post(codexEndpoint, req.body, axiosConfig)
     }
 
-    const codexUsageSnapshot = extractCodexUsageHeaders(upstream.headers)
+    const upstreamStatus = upstream.status || upstream.statusCode
+    const upstreamHeaders = upstream.headers || {}
+
+    const codexUsageSnapshot = extractCodexUsageHeaders(upstreamHeaders)
     if (codexUsageSnapshot) {
       try {
         await openaiAccountService.updateCodexUsageSnapshot(accountId, codexUsageSnapshot)
@@ -378,7 +407,7 @@ const handleResponses = async (req, res) => {
     }
 
     // 处理 429 限流错误
-    if (upstream.status === 429) {
+    if (upstreamStatus === 429) {
       logger.warn(`🚫 Rate limit detected for OpenAI account ${accountId} (Codex API)`)
 
       // 解析响应体中的限流信息
@@ -455,8 +484,8 @@ const handleResponses = async (req, res) => {
       }
 
       return
-    } else if (upstream.status === 401 || upstream.status === 402) {
-      const unauthorizedStatus = upstream.status
+    } else if (upstreamStatus === 401 || upstreamStatus === 402) {
+      const unauthorizedStatus = upstreamStatus
       const statusDescription = unauthorizedStatus === 401 ? 'Unauthorized' : 'Payment required'
       logger.warn(
         `🔐 ${statusDescription} error detected for OpenAI account ${accountId} (Codex API)`
@@ -535,7 +564,7 @@ const handleResponses = async (req, res) => {
 
       res.status(unauthorizedStatus).json(errorResponse)
       return
-    } else if (upstream.status === 200 || upstream.status === 201) {
+    } else if (upstreamStatus === 200 || upstreamStatus === 201) {
       // 请求成功，检查并移除限流状态
       const isRateLimited = await unifiedOpenAIScheduler.isAccountRateLimited(accountId)
       if (isRateLimited) {
@@ -546,7 +575,7 @@ const handleResponses = async (req, res) => {
       }
     }
 
-    res.status(upstream.status)
+    res.status(upstreamStatus)
 
     if (isStream) {
       // 流式响应头
@@ -562,7 +591,7 @@ const handleResponses = async (req, res) => {
     // 透传关键诊断头，避免传递不安全或与传输相关的头
     const passThroughHeaderKeys = ['openai-version', 'x-request-id', 'openai-processing-ms']
     for (const key of passThroughHeaderKeys) {
-      const val = upstream.headers?.[key]
+      const val = upstreamHeaders?.[key]
       if (val !== undefined) {
         res.setHeader(key, val)
       }
@@ -777,7 +806,7 @@ const handleResponses = async (req, res) => {
           sessionHash,
           rateLimitResetsInSeconds
         )
-      } else if (upstream.status === 200) {
+      } else if (upstreamStatus === 200) {
         // 流式请求成功，检查并移除限流状态
         const isRateLimited = await unifiedOpenAIScheduler.isAccountRateLimited(accountId)
         if (isRateLimited) {

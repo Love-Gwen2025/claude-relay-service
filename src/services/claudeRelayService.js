@@ -17,6 +17,7 @@ const requestIdentityService = require('./requestIdentityService')
 const { createClaudeTestPayload } = require('../utils/testPayloadHelper')
 const userMessageQueueService = require('./userMessageQueueService')
 const { isStreamWritable } = require('../utils/streamHelper')
+const gatewayClient = require('../utils/gatewayClient')
 
 class ClaudeRelayService {
   constructor() {
@@ -1112,8 +1113,6 @@ class ClaudeRelayService {
     onRequest,
     requestOptions = {}
   ) {
-    const url = new URL(this.claudeApiUrl)
-
     // 获取账户信息用于统一 User-Agent
     const account = await claudeAccountService.getAccount(accountId)
 
@@ -1135,6 +1134,49 @@ class ClaudeRelayService {
     }
 
     const { bodyString, headers } = prepared
+
+    // 🧭 出网指纹网关路径（非流式）
+    const useGateway = gatewayClient.shouldUseGateway()
+    const targetBaseUrl = requestOptions.customPath
+      ? new URL(requestOptions.customPath, 'https://api.anthropic.com')
+      : new URL(this.claudeApiUrl)
+
+    if (useGateway) {
+      const abortController = new AbortController()
+      if (onRequest && typeof onRequest === 'function') {
+        onRequest({
+          abort: () => abortController.abort()
+        })
+      }
+
+      const proxyUrl = gatewayClient.buildProxyUrl(account?.proxy)
+      const gatewayResponse = await gatewayClient.forward({
+        targetUrl: targetBaseUrl.toString(),
+        method: 'POST',
+        headers,
+        data: bodyString,
+        responseType: 'text',
+        timeout: config.requestTimeout || 600000,
+        signal: abortController.signal,
+        proxyConfig: account?.proxy
+      })
+
+      if (!gatewayResponse) {
+        throw new Error('Gateway forwarding failed')
+      }
+
+      return {
+        statusCode: gatewayResponse.status,
+        headers: gatewayResponse.headers || {},
+        body:
+          typeof gatewayResponse.data === 'string'
+            ? gatewayResponse.data
+            : gatewayResponse.data?.toString?.() || '',
+        accountId
+      }
+    }
+
+    const url = new URL(this.claudeApiUrl)
 
     return new Promise((resolve, reject) => {
       // 支持自定义路径（如 count_tokens）
@@ -1526,6 +1568,9 @@ class ClaudeRelayService {
 
     const { bodyString, headers } = prepared
 
+    const useGateway = gatewayClient.shouldUseGateway()
+    const targetUrl = new URL(this.claudeApiUrl)
+
     return new Promise((resolve, reject) => {
       const url = new URL(this.claudeApiUrl)
       const options = {
@@ -1538,7 +1583,7 @@ class ClaudeRelayService {
         timeout: config.requestTimeout || 600000
       }
 
-      const req = https.request(options, async (res) => {
+      const handleResponse = async (res) => {
         logger.debug(`🌊 Claude stream response status: ${res.statusCode}`)
 
         // 错误响应处理
@@ -2095,6 +2140,47 @@ class ClaudeRelayService {
           logger.debug('🌊 Claude stream response with usage capture completed')
           resolve()
         })
+      }
+
+      if (useGateway) {
+        const abortController = new AbortController()
+        if (onRequest && typeof onRequest === 'function') {
+          try {
+            onRequest({
+              abort: () => abortController.abort()
+            })
+          } catch (cbError) {
+            logger.debug('Failed to attach gateway abort handler:', cbError.message)
+          }
+        }
+
+        gatewayClient
+          .forward({
+            targetUrl: targetUrl.toString(),
+            method: 'POST',
+            headers,
+            data: bodyString,
+            responseType: 'stream',
+            timeout: config.requestTimeout || 600000,
+            signal: abortController.signal,
+            proxyConfig: account?.proxy
+          })
+          .then((gatewayResponse) => {
+            const res = gatewayResponse?.data
+            if (!res || typeof res.on !== 'function') {
+              reject(new Error('Invalid gateway stream response'))
+              return
+            }
+            res.statusCode = gatewayResponse.status
+            res.headers = gatewayResponse.headers || {}
+            handleResponse(res).catch(reject)
+          })
+          .catch(reject)
+        return
+      }
+
+      const req = https.request(options, (res) => {
+        handleResponse(res).catch(reject)
       })
 
       req.on('error', async (error) => {
