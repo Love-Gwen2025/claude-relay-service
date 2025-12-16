@@ -10,7 +10,7 @@ on:
 env:
   REGISTRY: ghcr.io
   # 自动获取当前仓库名 (格式: 用户名/项目名)
-  IMAGE_NAME: ${{ github.repository }}
+  IMAGE_NAME: love-gwen2025/claude-relay-service
 
 jobs:
   build-and-push:
