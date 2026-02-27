@@ -263,6 +263,50 @@ const handleResponses = async (req, res) => {
 
     sessionHash = sessionId ? crypto.createHash('sha256').update(sessionId).digest('hex') : null
 
+    // === Fallback session hash: prevent round-robin when no explicit session ID ===
+    if (!sessionHash) {
+      let fallbackContent = null
+
+      // 1. instructions (Codex CLI system prompt, stable within session)
+      if (req.body?.instructions && typeof req.body.instructions === 'string') {
+        fallbackContent = req.body.instructions
+      }
+
+      // 2. First input message content (OpenAI Responses API)
+      if (!fallbackContent && req.body?.input) {
+        const input = req.body.input
+        if (typeof input === 'string' && input.length > 0) {
+          fallbackContent = input
+        } else if (Array.isArray(input) && input.length > 0) {
+          const firstItem = input[0]
+          if (typeof firstItem === 'string') {
+            fallbackContent = firstItem
+          } else if (firstItem?.content) {
+            const content = firstItem.content
+            if (typeof content === 'string') {
+              fallbackContent = content
+            } else if (Array.isArray(content)) {
+              fallbackContent = content
+                .filter(p => p.type === 'text' || p.type === 'input_text')
+                .map(p => p.text || '')
+                .join('')
+            }
+          }
+        }
+      }
+
+      // 3. Fallback: API Key ID
+      if (!fallbackContent) {
+        fallbackContent = apiKeyData.id || apiKeyData.name || 'default'
+        logger.debug(`Using API key ID as fallback session identifier`)
+      }
+
+      if (fallbackContent) {
+        sessionHash = crypto.createHash('sha256').update(fallbackContent).digest('hex')
+        logger.debug(`Generated fallback session hash from request content: ${sessionHash.substring(0, 16)}...`)
+      }
+    }
+
     // 从请求体中提取模型和流式标志
     let requestedModel = req.body?.model || null
     const isCodexModel =
