@@ -110,13 +110,8 @@ async function applyRateLimitTracking(
 }
 
 // 使用统一调度器选择 OpenAI 账户
-async function getOpenAIAuthToken(apiKeyData, sessionId = null, requestedModel = null) {
+async function getOpenAIAuthToken(apiKeyData, sessionHash = null, requestedModel = null) {
   try {
-    // 生成会话哈希（如果有会话ID）
-    const sessionHash = sessionId
-      ? crypto.createHash('sha256').update(sessionId).digest('hex')
-      : null
-
     // 使用统一调度器选择账户
     const result = await unifiedOpenAIScheduler.selectAccountForApiKey(
       apiKeyData,
@@ -267,44 +262,20 @@ const handleResponses = async (req, res) => {
     if (!sessionHash) {
       let fallbackContent = null
 
-      // 1. instructions (Codex CLI system prompt, stable within session)
+      // 使用 API Key ID 作为基础，保证不同 key 不会绑到同一个账号
+      // 再叠加 instructions 区分同一 key 的不同会话上下文
+      const keyId = apiKeyData.id || apiKeyData.name || 'default'
+
       if (req.body?.instructions && typeof req.body.instructions === 'string') {
-        fallbackContent = req.body.instructions
+        fallbackContent = keyId + ':' + req.body.instructions
+      } else {
+        fallbackContent = keyId
       }
 
-      // 2. First input message content (OpenAI Responses API)
-      if (!fallbackContent && req.body?.input) {
-        const input = req.body.input
-        if (typeof input === 'string' && input.length > 0) {
-          fallbackContent = input
-        } else if (Array.isArray(input) && input.length > 0) {
-          const firstItem = input[0]
-          if (typeof firstItem === 'string') {
-            fallbackContent = firstItem
-          } else if (firstItem?.content) {
-            const content = firstItem.content
-            if (typeof content === 'string') {
-              fallbackContent = content
-            } else if (Array.isArray(content)) {
-              fallbackContent = content
-                .filter(p => p.type === 'text' || p.type === 'input_text')
-                .map(p => p.text || '')
-                .join('')
-            }
-          }
-        }
-      }
-
-      // 3. Fallback: API Key ID
-      if (!fallbackContent) {
-        fallbackContent = apiKeyData.id || apiKeyData.name || 'default'
-        logger.debug(`Using API key ID as fallback session identifier`)
-      }
-
-      if (fallbackContent) {
-        sessionHash = crypto.createHash('sha256').update(fallbackContent).digest('hex')
-        logger.debug(`Generated fallback session hash from request content: ${sessionHash.substring(0, 16)}...`)
-      }
+      sessionHash = crypto.createHash('sha256').update(fallbackContent).digest('hex')
+      logger.info(
+        `📋 Fallback session hash for key ${apiKeyData.name}: ${sessionHash.substring(0, 16)}...`
+      )
     }
 
     // 从请求体中提取模型和流式标志
@@ -354,10 +325,10 @@ const handleResponses = async (req, res) => {
       logger.info('✅ Codex CLI request detected, forwarding as-is')
     }
 
-    // 使用调度器选择账户
+    // 使用调度器选择账户（传入已增强的 sessionHash，含 fallback 逻辑）
     ;({ accessToken, accountId, accountType, proxy, account } = await getOpenAIAuthToken(
       apiKeyData,
-      sessionId,
+      sessionHash,
       requestedModel
     ))
 
