@@ -2104,7 +2104,7 @@
                 </div>
               </div>
 
-              <div v-if="form.platform === 'openai'">
+              <div v-if="form.platform === 'openai' && parsedRefreshTokenCount <= 1">
                 <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300"
                   >Access Token (可选)</label
                 >
@@ -2138,19 +2138,40 @@
               </div>
 
               <div v-if="form.platform === 'openai' || form.platform === 'droid'">
-                <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300"
-                  >Refresh Token *</label
+                <label
+                  class="mb-3 flex items-center gap-2 text-sm font-semibold text-gray-700 dark:text-gray-300"
                 >
+                  Refresh Token *
+                  <span
+                    v-if="parsedRefreshTokenCount > 1 && form.platform === 'openai'"
+                    class="rounded-full bg-blue-500 px-2 py-0.5 text-xs font-normal text-white"
+                  >
+                    {{ parsedRefreshTokenCount }} 个
+                  </span>
+                </label>
                 <textarea
                   v-model="form.refreshToken"
                   class="form-input w-full resize-none border-gray-300 font-mono text-xs dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 dark:placeholder-gray-400"
                   :class="{ 'border-red-500': errors.refreshToken }"
-                  placeholder="请输入 Refresh Token（必填）..."
+                  :placeholder="
+                    form.platform === 'openai'
+                      ? '每行一个 Refresh Token，支持批量添加：\neyJhbGci...\neyJhbGci...'
+                      : '请输入 Refresh Token（必填）...'
+                  "
                   required
-                  rows="4"
+                  :rows="form.platform === 'openai' ? 5 : 4"
                 />
                 <p v-if="errors.refreshToken" class="mt-1 text-xs text-red-500">
                   {{ errors.refreshToken }}
+                </p>
+                <p
+                  v-if="parsedRefreshTokenCount > 1 && form.platform === 'openai'"
+                  class="mt-1 text-xs text-blue-600 dark:text-blue-400"
+                >
+                  <i class="fas fa-layer-group mr-1" />
+                  将批量创建 {{ parsedRefreshTokenCount }} 个 OpenAI 账户，名称格式：{{
+                    form.name || 'baseName'
+                  }}_1, {{ form.name || 'baseName' }}_2, ...
                 </p>
                 <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
                   <i class="fas fa-info-circle mr-1" />
@@ -2302,7 +2323,14 @@
                 @click="createAccount"
               >
                 <div v-if="loading" class="loading-spinner mr-2" />
-                {{ loading ? '创建中...' : '创建' }}
+                <template v-if="loading && batchProgress.total > 1">
+                  正在创建 {{ batchProgress.current }}/{{ batchProgress.total }}...
+                </template>
+                <template v-else-if="loading"> 创建中... </template>
+                <template v-else-if="parsedRefreshTokenCount > 1">
+                  批量创建 {{ parsedRefreshTokenCount }} 个账户
+                </template>
+                <template v-else> 创建 </template>
               </button>
             </div>
           </div>
@@ -4137,6 +4165,16 @@ const parsedSessionKeyCount = computed(() => {
     .filter((s) => s.length > 0).length
 })
 
+// 解析后的 OpenAI Refresh Token 数量（批量添加）
+const parsedRefreshTokenCount = computed(() => {
+  if (form.value.platform !== 'openai' || form.value.addType !== 'manual') return 0
+  if (!form.value.refreshToken) return 0
+  return form.value.refreshToken
+    .split('\n')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0).length
+})
+
 // Claude Code 统一 User-Agent 信息
 const unifiedUserAgent = ref('')
 const clearingCache = ref(false)
@@ -5449,19 +5487,100 @@ const createAccount = async () => {
       // 添加 Gemini 优先级
       data.priority = form.value.priority || 50
     } else if (form.value.platform === 'openai') {
-      // OpenAI手动模式需要构建openaiOauth对象
+      // 解析多行 Refresh Token（支持批量）
+      const refreshTokens = form.value.refreshToken
+        .split('\n')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+
+      const isBatch = refreshTokens.length > 1
+
+      if (isBatch) {
+        // -- 批量模式 --
+        const baseName = form.value.name
+        const results = []
+        const batchErrors = []
+        batchProgress.value = { current: 0, total: refreshTokens.length }
+
+        for (let i = 0; i < refreshTokens.length; i++) {
+          batchProgress.value.current = i + 1
+          const accountName = `${baseName}_${i + 1}`
+          const singleToken = refreshTokens[i]
+
+          const singleData = {
+            ...data,
+            name: accountName,
+            openaiOauth: {
+              idToken: '',
+              accessToken: '',
+              refreshToken: singleToken,
+              expires_in: 600 // 10分钟
+            },
+            accountInfo: {
+              accountId: '',
+              chatgptUserId: '',
+              organizationId: '',
+              organizationRole: '',
+              organizationTitle: '',
+              planType: '',
+              email: '',
+              emailVerified: false
+            },
+            needsImmediateRefresh: true,
+            requireRefreshSuccess: true,
+            priority: form.value.priority || 50
+          }
+
+          try {
+            const result = await accountsStore.createOpenAIAccount(singleData)
+            results.push(result)
+          } catch (error) {
+            batchErrors.push({
+              index: i + 1,
+              token: singleToken.substring(0, 20) + '...',
+              error: error.response?.data?.error || error.response?.data?.message || error.message
+            })
+          }
+        }
+
+        batchProgress.value = { current: 0, total: 0 }
+
+        // 显示结果
+        if (results.length > 0) {
+          const msg = `成功创建 ${results.length}/${refreshTokens.length} 个 OpenAI 账户`
+          showToast(
+            msg,
+            results.length === refreshTokens.length ? 'success' : 'warning',
+            '',
+            5000
+          )
+          emit('success', results[0])
+        }
+        if (batchErrors.length > 0 && results.length === 0) {
+          showToast('全部创建失败，请检查 Refresh Token 是否有效', 'error', '', 8000)
+        } else if (batchErrors.length > 0) {
+          const errorDetail = batchErrors
+            .map((e) => `#${e.index}: ${e.error}`)
+            .join('\n')
+          showToast(`${batchErrors.length} 个账户创建失败:\n${errorDetail}`, 'error', '', 8000)
+        }
+
+        loading.value = false
+        return // 批量模式直接返回，不走下面的单条创建路径
+      }
+
+      // -- 单条模式（保持原有逻辑） --
       const expiresInMs = form.value.refreshToken
         ? 10 * 60 * 1000 // 10分钟
         : 365 * 24 * 60 * 60 * 1000 // 1年
 
       data.openaiOauth = {
-        idToken: '', // 不再需要用户输入，系统会自动获取
-        accessToken: form.value.accessToken || '', // Access Token 可选
-        refreshToken: form.value.refreshToken, // Refresh Token 必填
-        expires_in: Math.floor(expiresInMs / 1000) // 转换为秒
+        idToken: '',
+        accessToken: form.value.accessToken || '',
+        refreshToken: refreshTokens[0],
+        expires_in: Math.floor(expiresInMs / 1000)
       }
 
-      // 账户信息将在首次刷新时自动获取
       data.accountInfo = {
         accountId: '',
         chatgptUserId: '',
@@ -5473,9 +5592,8 @@ const createAccount = async () => {
         emailVerified: false
       }
 
-      // OpenAI 手动模式必须刷新以获取完整信息（包括 ID Token）
       data.needsImmediateRefresh = true
-      data.requireRefreshSuccess = true // 必须刷新成功才能创建账户
+      data.requireRefreshSuccess = true
       data.priority = form.value.priority || 50
     } else if (form.value.platform === 'droid') {
       data.priority = form.value.priority || 50
