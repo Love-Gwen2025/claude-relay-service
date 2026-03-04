@@ -110,13 +110,8 @@ async function applyRateLimitTracking(
 }
 
 // 使用统一调度器选择 OpenAI 账户
-async function getOpenAIAuthToken(apiKeyData, sessionId = null, requestedModel = null) {
+async function getOpenAIAuthToken(apiKeyData, sessionHash = null, requestedModel = null) {
   try {
-    // 生成会话哈希（如果有会话ID）
-    const sessionHash = sessionId
-      ? crypto.createHash('sha256').update(sessionId).digest('hex')
-      : null
-
     // 使用统一调度器选择账户
     const result = await unifiedOpenAIScheduler.selectAccountForApiKey(
       apiKeyData,
@@ -263,6 +258,26 @@ const handleResponses = async (req, res) => {
 
     sessionHash = sessionId ? crypto.createHash('sha256').update(sessionId).digest('hex') : null
 
+    // === Fallback session hash: prevent round-robin when no explicit session ID ===
+    if (!sessionHash) {
+      let fallbackContent = null
+
+      // 使用 API Key ID 作为基础，保证不同 key 不会绑到同一个账号
+      // 再叠加 instructions 区分同一 key 的不同会话上下文
+      const keyId = apiKeyData.id || apiKeyData.name || 'default'
+
+      if (req.body?.instructions && typeof req.body.instructions === 'string') {
+        fallbackContent = keyId + ':' + req.body.instructions
+      } else {
+        fallbackContent = keyId
+      }
+
+      sessionHash = crypto.createHash('sha256').update(fallbackContent).digest('hex')
+      logger.info(
+        `📋 Fallback session hash for key ${apiKeyData.name}: ${sessionHash.substring(0, 16)}...`
+      )
+    }
+
     // 从请求体中提取模型和流式标志
     let requestedModel = req.body?.model || null
     const isCodexModel =
@@ -310,10 +325,10 @@ const handleResponses = async (req, res) => {
       logger.info('✅ Codex CLI request detected, forwarding as-is')
     }
 
-    // 使用调度器选择账户
+    // 使用调度器选择账户（传入已增强的 sessionHash，含 fallback 逻辑）
     ;({ accessToken, accountId, accountType, proxy, account } = await getOpenAIAuthToken(
       apiKeyData,
-      sessionId,
+      sessionHash,
       requestedModel
     ))
 
