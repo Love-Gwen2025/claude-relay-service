@@ -5548,20 +5548,13 @@ const createAccount = async () => {
         // 显示结果
         if (results.length > 0) {
           const msg = `成功创建 ${results.length}/${refreshTokens.length} 个 OpenAI 账户`
-          showToast(
-            msg,
-            results.length === refreshTokens.length ? 'success' : 'warning',
-            '',
-            5000
-          )
+          showToast(msg, results.length === refreshTokens.length ? 'success' : 'warning', '', 5000)
           emit('success', results[0])
         }
         if (batchErrors.length > 0 && results.length === 0) {
           showToast('全部创建失败，请检查 Refresh Token 是否有效', 'error', '', 8000)
         } else if (batchErrors.length > 0) {
-          const errorDetail = batchErrors
-            .map((e) => `#${e.index}: ${e.error}`)
-            .join('\n')
+          const errorDetail = batchErrors.map((e) => `#${e.index}: ${e.error}`).join('\n')
           showToast(`${batchErrors.length} 个账户创建失败:\n${errorDetail}`, 'error', '', 8000)
         }
 
