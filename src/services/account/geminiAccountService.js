@@ -29,20 +29,15 @@ const OAUTH_PROVIDER_ANTIGRAVITY = 'antigravity'
 
 const OAUTH_PROVIDERS = {
   [OAUTH_PROVIDER_GEMINI_CLI]: {
-    // Gemini CLI OAuth 配置（公开）
-    clientId:
-      process.env.GEMINI_OAUTH_CLIENT_ID ||
-      '681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com',
-    clientSecret: process.env.GEMINI_OAUTH_CLIENT_SECRET || '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',
+    // Gemini CLI OAuth 配置（must be provided via env; do not hardcode secrets in repo）
+    clientId: process.env.GEMINI_OAUTH_CLIENT_ID || '',
+    clientSecret: process.env.GEMINI_OAUTH_CLIENT_SECRET || '',
     scopes: ['https://www.googleapis.com/auth/cloud-platform']
   },
   [OAUTH_PROVIDER_ANTIGRAVITY]: {
     // Antigravity OAuth 配置（参考 gcli2api）
-    clientId:
-      process.env.ANTIGRAVITY_OAUTH_CLIENT_ID ||
-      '1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com',
-    clientSecret:
-      process.env.ANTIGRAVITY_OAUTH_CLIENT_SECRET || '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',
+    clientId: process.env.ANTIGRAVITY_OAUTH_CLIENT_ID || '',
+    clientSecret: process.env.ANTIGRAVITY_OAUTH_CLIENT_SECRET || '',
     scopes: [
       'https://www.googleapis.com/auth/cloud-platform',
       'https://www.googleapis.com/auth/userinfo.email',
@@ -53,14 +48,14 @@ const OAUTH_PROVIDERS = {
   }
 }
 
-if (!process.env.GEMINI_OAUTH_CLIENT_SECRET) {
+if (!process.env.GEMINI_OAUTH_CLIENT_ID || !process.env.GEMINI_OAUTH_CLIENT_SECRET) {
   logger.warn(
-    '⚠️ GEMINI_OAUTH_CLIENT_SECRET 未设置，使用内置默认值（建议在生产环境通过环境变量覆盖）'
+    '⚠️ Gemini OAuth env 未完整设置：需要 GEMINI_OAUTH_CLIENT_ID + GEMINI_OAUTH_CLIENT_SECRET'
   )
 }
-if (!process.env.ANTIGRAVITY_OAUTH_CLIENT_SECRET) {
+if (!process.env.ANTIGRAVITY_OAUTH_CLIENT_ID || !process.env.ANTIGRAVITY_OAUTH_CLIENT_SECRET) {
   logger.warn(
-    '⚠️ ANTIGRAVITY_OAUTH_CLIENT_SECRET 未设置，使用内置默认值（建议在生产环境通过环境变量覆盖）'
+    '⚠️ Antigravity OAuth env 未完整设置：需要 ANTIGRAVITY_OAUTH_CLIENT_ID + ANTIGRAVITY_OAUTH_CLIENT_SECRET'
   )
 }
 
@@ -75,7 +70,17 @@ function normalizeOauthProvider(oauthProvider) {
 
 function getOauthProviderConfig(oauthProvider) {
   const normalized = normalizeOauthProvider(oauthProvider)
-  return OAUTH_PROVIDERS[normalized] || OAUTH_PROVIDERS[OAUTH_PROVIDER_GEMINI_CLI]
+  const cfg = OAUTH_PROVIDERS[normalized] || OAUTH_PROVIDERS[OAUTH_PROVIDER_GEMINI_CLI]
+
+  if (!cfg?.clientId || !cfg?.clientSecret) {
+    const envHint =
+      normalized === OAUTH_PROVIDER_ANTIGRAVITY
+        ? 'ANTIGRAVITY_OAUTH_CLIENT_ID + ANTIGRAVITY_OAUTH_CLIENT_SECRET'
+        : 'GEMINI_OAUTH_CLIENT_ID + GEMINI_OAUTH_CLIENT_SECRET'
+    throw new Error(`OAuth provider "${normalized}" is not configured. Set env: ${envHint}`)
+  }
+
+  return cfg
 }
 
 // 🌐 TCP Keep-Alive Agent 配置
@@ -786,7 +791,7 @@ async function getAllAccounts() {
     const accountData = dataList[i]
     if (accountData && Object.keys(accountData).length > 0) {
       // 获取限流状态信息
-      const rateLimitInfo = await getAccountRateLimitInfo(accountData.id)
+      const rateLimitInfo = await getAccountRateLimitInfo(accountData.id, accountData)
 
       // 解析代理配置
       if (accountData.proxy) {
@@ -1140,9 +1145,9 @@ async function setAccountRateLimited(accountId, isLimited = true) {
 }
 
 // 获取账户的限流信息（参考 claudeAccountService 的实现）
-async function getAccountRateLimitInfo(accountId) {
+async function getAccountRateLimitInfo(accountId, accountData = null) {
   try {
-    const account = await getAccount(accountId)
+    const account = accountData || (await getAccount(accountId))
     if (!account) {
       return null
     }

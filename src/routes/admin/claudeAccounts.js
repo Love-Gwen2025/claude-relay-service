@@ -401,18 +401,21 @@ router.get('/claude-accounts', authenticateAdmin, async (req, res) => {
       accounts = []
     }
 
+    // 批量获取所有账户的分组信息（避免 N+1 查询）
+    const allAccountIds = accounts.map((a) => a.id)
+    const accountGroupsMap = await accountGroupService.batchGetAccountGroupsByIndex(
+      allAccountIds,
+      'claude'
+    )
+
     // 如果指定了分组筛选
     if (groupId && groupId !== 'all') {
       if (groupId === 'ungrouped') {
         // 筛选未分组账户
-        const filteredAccounts = []
-        for (const account of accounts) {
-          const groups = await accountGroupService.getAccountGroups(account.id)
-          if (!groups || groups.length === 0) {
-            filteredAccounts.push(account)
-          }
-        }
-        accounts = filteredAccounts
+        accounts = accounts.filter((account) => {
+          const groups = accountGroupsMap.get(account.id) || []
+          return groups.length === 0
+        })
       } else {
         // 筛选特定分组的账户
         const groupMembers = await accountGroupService.getGroupMembers(groupId)
@@ -420,12 +423,26 @@ router.get('/claude-accounts', authenticateAdmin, async (req, res) => {
       }
     }
 
+    // 批量获取所有账户的使用统计（避免 N+1 查询）
+    const filteredAccountIds = accounts.map((a) => a.id)
+    const createdAtMap = new Map()
+    accounts.forEach((a) => createdAtMap.set(a.id, a.createdAt))
+    const usageStatsMap = await redis.batchGetAccountUsageStats(
+      filteredAccountIds,
+      'claude',
+      createdAtMap
+    )
+
     // 为每个账户添加使用统计信息
     const accountsWithStats = await Promise.all(
       accounts.map(async (account) => {
         try {
-          const usageStats = await redis.getAccountUsageStats(account.id, 'openai')
-          const groupInfos = await accountGroupService.getAccountGroups(account.id)
+          const usageStats = usageStatsMap.get(account.id) || {
+            total: { tokens: 0, requests: 0, allTokens: 0 },
+            daily: { tokens: 0, requests: 0, allTokens: 0, cost: 0 },
+            averages: { rpm: 0, tpm: 0, dailyRequests: 0, dailyTokens: 0 }
+          }
+          const groupInfos = accountGroupsMap.get(account.id) || []
 
           // 获取会话窗口使用统计（仅对有活跃窗口的账户）
           let sessionWindowUsage = null
@@ -490,35 +507,16 @@ router.get('/claude-accounts', authenticateAdmin, async (req, res) => {
           }
         } catch (statsError) {
           logger.warn(`⚠️ Failed to get usage stats for account ${account.id}:`, statsError.message)
-          // 如果获取统计失败，返回空统计
-          try {
-            const groupInfos = await accountGroupService.getAccountGroups(account.id)
-            const formattedAccount = formatAccountExpiry(account)
-            return {
-              ...formattedAccount,
-              groupInfos,
-              usage: {
-                daily: { tokens: 0, requests: 0, allTokens: 0 },
-                total: { tokens: 0, requests: 0, allTokens: 0 },
-                averages: { rpm: 0, tpm: 0 },
-                sessionWindow: null
-              }
-            }
-          } catch (groupError) {
-            logger.warn(
-              `⚠️ Failed to get group info for account ${account.id}:`,
-              groupError.message
-            )
-            const formattedAccount = formatAccountExpiry(account)
-            return {
-              ...formattedAccount,
-              groupInfos: [],
-              usage: {
-                daily: { tokens: 0, requests: 0, allTokens: 0 },
-                total: { tokens: 0, requests: 0, allTokens: 0 },
-                averages: { rpm: 0, tpm: 0 },
-                sessionWindow: null
-              }
+          const groupInfos = accountGroupsMap.get(account.id) || []
+          const formattedAccount = formatAccountExpiry(account)
+          return {
+            ...formattedAccount,
+            groupInfos,
+            usage: {
+              daily: { tokens: 0, requests: 0, allTokens: 0 },
+              total: { tokens: 0, requests: 0, allTokens: 0 },
+              averages: { rpm: 0, tpm: 0 },
+              sessionWindow: null
             }
           }
         }

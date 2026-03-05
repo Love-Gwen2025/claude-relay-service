@@ -12,10 +12,39 @@ const {
 const { cleanJsonSchemaForGemini } = require('../utils/geminiSchemaCleaner')
 const { dumpAntigravityUpstreamRequest } = require('../utils/antigravityUpstreamDump')
 
+function safeAntigravityDataToString(value) {
+  if (typeof value === 'string') {
+    return value
+  }
+  if (value === null || value === undefined) {
+    return ''
+  }
+  // axios responseType=stream 时，data 可能是 stream（存在循环引用），不能 JSON.stringify
+  if (typeof value === 'object' && typeof value.pipe === 'function') {
+    return ''
+  }
+  if (Buffer.isBuffer(value)) {
+    try {
+      return value.toString('utf8')
+    } catch (_) {
+      return ''
+    }
+  }
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value)
+    } catch (_) {
+      return ''
+    }
+  }
+  return String(value)
+}
+
 const keepAliveAgent = new https.Agent({
   keepAlive: true,
   keepAliveMsecs: 30000,
-  timeout: 120000,
+  // Avoid killing long non-stream requests; axios timeout controls request deadlines.
+  timeout: 0,
   maxSockets: 100,
   maxFreeSockets: 10
 })
@@ -150,9 +179,15 @@ function normalizeAntigravityThinking(model, requestPayload) {
 
   const budgetRaw = Number(thinkingConfig.thinkingBudget)
   if (!Number.isFinite(budgetRaw)) {
+    // Invalid budget can trigger upstream 400s; drop thinkingConfig entirely.
+    delete generationConfig.thinkingConfig
     return
   }
   let budget = Math.trunc(budgetRaw)
+  if (budget < 0) {
+    delete generationConfig.thinkingConfig
+    return
+  }
 
   const minBudget = Number.isFinite(metadata.thinking.min) ? metadata.thinking.min : null
   const maxBudget = Number.isFinite(metadata.thinking.max) ? metadata.thinking.max : null
@@ -204,7 +239,10 @@ function normalizeAntigravityEnvelope(envelope) {
     const existing = requestPayload?.toolConfig?.functionCallingConfig || null
     if (existing?.mode !== 'NONE') {
       const nextCfg = { ...(existing || {}), mode: 'VALIDATED' }
-      requestPayload.toolConfig = { functionCallingConfig: nextCfg }
+      requestPayload.toolConfig = {
+        ...(requestPayload.toolConfig || {}),
+        functionCallingConfig: nextCfg
+      }
     }
   }
 
@@ -318,35 +356,7 @@ async function request({
     // 400/404 的 “model unavailable / not found” 在不同环境间可能表现不同，允许 fallback。
     if (status === 400 || status === 404) {
       const data = error?.response?.data
-      const safeToString = (value) => {
-        if (typeof value === 'string') {
-          return value
-        }
-        if (value === null || value === undefined) {
-          return ''
-        }
-        // axios responseType=stream 时，data 可能是 stream（存在循环引用），不能 JSON.stringify
-        if (typeof value === 'object' && typeof value.pipe === 'function') {
-          return ''
-        }
-        if (Buffer.isBuffer(value)) {
-          try {
-            return value.toString('utf8')
-          } catch (_) {
-            return ''
-          }
-        }
-        if (typeof value === 'object') {
-          try {
-            return JSON.stringify(value)
-          } catch (_) {
-            return ''
-          }
-        }
-        return String(value)
-      }
-
-      const text = safeToString(data)
+      const text = safeAntigravityDataToString(data)
       const msg = (text || '').toLowerCase()
       return (
         msg.includes('requested model is currently unavailable') ||
@@ -437,35 +447,7 @@ async function request({
       const data = error?.response?.data
 
       // 安全地将 data 转为字符串，避免 stream 对象导致循环引用崩溃
-      const safeDataToString = (value) => {
-        if (typeof value === 'string') {
-          return value
-        }
-        if (value === null || value === undefined) {
-          return ''
-        }
-        // stream 对象存在循环引用，不能 JSON.stringify
-        if (typeof value === 'object' && typeof value.pipe === 'function') {
-          return ''
-        }
-        if (Buffer.isBuffer(value)) {
-          try {
-            return value.toString('utf8')
-          } catch (_) {
-            return ''
-          }
-        }
-        if (typeof value === 'object') {
-          try {
-            return JSON.stringify(value)
-          } catch (_) {
-            return ''
-          }
-        }
-        return String(value)
-      }
-
-      const msg = safeDataToString(data)
+      const msg = safeAntigravityDataToString(data)
       if (
         msg.toLowerCase().includes('resource_exhausted') ||
         msg.toLowerCase().includes('no capacity')

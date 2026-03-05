@@ -546,16 +546,28 @@ class ClaudeAccountService {
     try {
       const accounts = await redis.getAllClaudeAccounts()
 
+      // 批量检查过载状态（避免 N 次独立 GET）
+      const overloadMinutes = config.overloadHandling?.enabled || 0
+      const overloadMap = new Map()
+      if (overloadMinutes > 0) {
+        const pipeline = redis.getClientSafe().pipeline()
+        accounts.forEach((a) => pipeline.get(`account:overload:${a.id}`))
+        const overloadResults = await pipeline.exec()
+        accounts.forEach((a, i) => {
+          const [err, val] = overloadResults[i]
+          overloadMap.set(a.id, !err && !!val)
+        })
+      }
+
       // 处理返回数据，移除敏感信息并添加限流状态和会话窗口信息
       const processedAccounts = await Promise.all(
         accounts.map(async (account) => {
-          const [rateLimitInfo, sessionWindowInfo, opusRateLimitStatus, isOverloaded] =
-            await Promise.all([
-              this.getAccountRateLimitInfo(account.id),
-              this.getSessionWindowInfo(account.id),
-              this.getAccountOpusRateLimitInfo(account.id, account),
-              this.isAccountOverloaded(account.id)
-            ])
+          const [rateLimitInfo, sessionWindowInfo, opusRateLimitStatus] = await Promise.all([
+            this.getAccountRateLimitInfo(account.id, account),
+            this.getSessionWindowInfo(account.id, account),
+            this.getAccountOpusRateLimitInfo(account.id, account)
+          ])
+          const isOverloaded = overloadMap.get(account.id) || false
 
           // 构建 Claude Usage 快照（从 Redis 读取）
           const claudeUsage = this.buildClaudeUsageSnapshot(account)
@@ -678,8 +690,8 @@ class ClaudeAccountService {
       }
 
       const [sessionWindowInfo, rateLimitInfo] = await Promise.all([
-        this.getSessionWindowInfo(accountId),
-        this.getAccountRateLimitInfo(accountId)
+        this.getSessionWindowInfo(accountId, accountData),
+        this.getAccountRateLimitInfo(accountId, accountData)
       ])
 
       const sessionWindow = sessionWindowInfo || {
@@ -1772,15 +1784,15 @@ class ClaudeAccountService {
   }
 
   // 📊 获取账号的限流信息
-  async getAccountRateLimitInfo(accountId) {
+  async getAccountRateLimitInfo(accountId, accountData = null) {
     try {
-      const accountData = await redis.getClaudeAccount(accountId)
-      if (!accountData || Object.keys(accountData).length === 0) {
+      const data = accountData || (await redis.getClaudeAccount(accountId))
+      if (!data || Object.keys(data).length === 0) {
         return null
       }
 
-      if (accountData.rateLimitStatus === 'limited' && accountData.rateLimitedAt) {
-        const rateLimitedAt = new Date(accountData.rateLimitedAt)
+      if (data.rateLimitStatus === 'limited' && data.rateLimitedAt) {
+        const rateLimitedAt = new Date(data.rateLimitedAt)
         const now = new Date()
         const minutesSinceRateLimit = Math.floor((now - rateLimitedAt) / (1000 * 60))
 
@@ -1788,9 +1800,9 @@ class ClaudeAccountService {
         let rateLimitEndAt
 
         // 优先使用 rateLimitEndAt（基于会话窗口）
-        if (accountData.rateLimitEndAt) {
-          ;({ rateLimitEndAt } = accountData)
-          const endTime = new Date(accountData.rateLimitEndAt)
+        if (data.rateLimitEndAt) {
+          ;({ rateLimitEndAt } = data)
+          const endTime = new Date(data.rateLimitEndAt)
           minutesRemaining = Math.max(0, Math.ceil((endTime - now) / (1000 * 60)))
         } else {
           // 兼容旧数据：使用1小时限流
@@ -1802,7 +1814,7 @@ class ClaudeAccountService {
 
         return {
           isRateLimited: minutesRemaining > 0,
-          rateLimitedAt: accountData.rateLimitedAt,
+          rateLimitedAt: data.rateLimitedAt,
           minutesSinceRateLimit,
           minutesRemaining,
           rateLimitEndAt // 新增：限流结束时间
@@ -1965,41 +1977,41 @@ class ClaudeAccountService {
   }
 
   // 📊 获取会话窗口信息
-  async getSessionWindowInfo(accountId) {
+  async getSessionWindowInfo(accountId, accountData = null) {
     try {
-      const accountData = await redis.getClaudeAccount(accountId)
-      if (!accountData || Object.keys(accountData).length === 0) {
+      const data = accountData || (await redis.getClaudeAccount(accountId))
+      if (!data || Object.keys(data).length === 0) {
         return null
       }
 
       // 如果没有会话窗口信息，返回null
-      if (!accountData.sessionWindowStart || !accountData.sessionWindowEnd) {
+      if (!data.sessionWindowStart || !data.sessionWindowEnd) {
         return {
           hasActiveWindow: false,
           windowStart: null,
           windowEnd: null,
           progress: 0,
           remainingTime: null,
-          lastRequestTime: accountData.lastRequestTime || null,
-          sessionWindowStatus: accountData.sessionWindowStatus || null
+          lastRequestTime: data.lastRequestTime || null,
+          sessionWindowStatus: data.sessionWindowStatus || null
         }
       }
 
       const now = new Date()
-      const windowStart = new Date(accountData.sessionWindowStart)
-      const windowEnd = new Date(accountData.sessionWindowEnd)
+      const windowStart = new Date(data.sessionWindowStart)
+      const windowEnd = new Date(data.sessionWindowEnd)
       const currentTime = now.getTime()
 
       // 检查窗口是否已过期
       if (currentTime >= windowEnd.getTime()) {
         return {
           hasActiveWindow: false,
-          windowStart: accountData.sessionWindowStart,
-          windowEnd: accountData.sessionWindowEnd,
+          windowStart: data.sessionWindowStart,
+          windowEnd: data.sessionWindowEnd,
           progress: 100,
           remainingTime: 0,
-          lastRequestTime: accountData.lastRequestTime || null,
-          sessionWindowStatus: accountData.sessionWindowStatus || null
+          lastRequestTime: data.lastRequestTime || null,
+          sessionWindowStatus: data.sessionWindowStatus || null
         }
       }
 
@@ -2013,12 +2025,12 @@ class ClaudeAccountService {
 
       return {
         hasActiveWindow: true,
-        windowStart: accountData.sessionWindowStart,
-        windowEnd: accountData.sessionWindowEnd,
+        windowStart: data.sessionWindowStart,
+        windowEnd: data.sessionWindowEnd,
         progress,
         remainingTime,
-        lastRequestTime: accountData.lastRequestTime || null,
-        sessionWindowStatus: accountData.sessionWindowStatus || null
+        lastRequestTime: data.lastRequestTime || null,
+        sessionWindowStatus: data.sessionWindowStatus || null
       }
     } catch (error) {
       logger.error(`❌ Failed to get session window info for account ${accountId}:`, error)

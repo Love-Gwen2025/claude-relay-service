@@ -232,34 +232,27 @@ router.get('/', authenticateAdmin, async (req, res) => {
     const { platform, groupId } = req.query
     let accounts = await openaiAccountService.getAllAccounts()
 
-    // 缓存账户所属分组，避免重复查询
-    const accountGroupCache = new Map()
-    const fetchAccountGroups = async (accountId) => {
-      if (!accountGroupCache.has(accountId)) {
-        const groups = await accountGroupService.getAccountGroups(accountId)
-        accountGroupCache.set(accountId, groups || [])
-      }
-      return accountGroupCache.get(accountId)
-    }
-
     // 根据查询参数进行筛选
     if (platform && platform !== 'all' && platform !== 'openai') {
       // 如果指定了其他平台，返回空数组
       accounts = []
     }
 
+    // 批量获取所有账户的分组信息（避免 N+1 查询）
+    const allAccountIds = accounts.map((a) => a.id)
+    const accountGroupsMap = await accountGroupService.batchGetAccountGroupsByIndex(
+      allAccountIds,
+      'openai'
+    )
+
     // 如果指定了分组筛选
     if (groupId && groupId !== 'all') {
       if (groupId === 'ungrouped') {
         // 筛选未分组账户
-        const filteredAccounts = []
-        for (const account of accounts) {
-          const groups = await fetchAccountGroups(account.id)
-          if (!groups || groups.length === 0) {
-            filteredAccounts.push(account)
-          }
-        }
-        accounts = filteredAccounts
+        accounts = accounts.filter((account) => {
+          const groups = accountGroupsMap.get(account.id) || []
+          return groups.length === 0
+        })
       } else {
         // 筛选特定分组的账户
         const groupMembers = await accountGroupService.getGroupMembers(groupId)
@@ -267,38 +260,35 @@ router.get('/', authenticateAdmin, async (req, res) => {
       }
     }
 
-    // 为每个账户添加使用统计信息
-    const accountsWithStats = await Promise.all(
-      accounts.map(async (account) => {
-        try {
-          const usageStats = await redis.getAccountUsageStats(account.id, 'openai')
-          const groupInfos = await fetchAccountGroups(account.id)
-          const formattedAccount = formatAccountExpiry(account)
-          return {
-            ...formattedAccount,
-            groupInfos,
-            usage: {
-              daily: usageStats.daily,
-              total: usageStats.total,
-              monthly: usageStats.monthly
-            }
-          }
-        } catch (error) {
-          logger.debug(`Failed to get usage stats for OpenAI account ${account.id}:`, error)
-          const groupInfos = await fetchAccountGroups(account.id)
-          const formattedAccount = formatAccountExpiry(account)
-          return {
-            ...formattedAccount,
-            groupInfos,
-            usage: {
-              daily: { requests: 0, tokens: 0, allTokens: 0 },
-              total: { requests: 0, tokens: 0, allTokens: 0 },
-              monthly: { requests: 0, tokens: 0, allTokens: 0 }
-            }
-          }
-        }
-      })
+    // 批量获取所有账户的使用统计（避免 N+1 查询）
+    const filteredAccountIds = accounts.map((a) => a.id)
+    const createdAtMap = new Map()
+    accounts.forEach((a) => createdAtMap.set(a.id, a.createdAt))
+    const usageStatsMap = await redis.batchGetAccountUsageStats(
+      filteredAccountIds,
+      'openai',
+      createdAtMap
     )
+
+    // 为每个账户添加使用统计信息
+    const accountsWithStats = accounts.map((account) => {
+      const usageStats = usageStatsMap.get(account.id) || {
+        total: { tokens: 0, requests: 0, allTokens: 0 },
+        daily: { tokens: 0, requests: 0, allTokens: 0, cost: 0 },
+        monthly: { tokens: 0, requests: 0, allTokens: 0 }
+      }
+      const groupInfos = accountGroupsMap.get(account.id) || []
+      const formattedAccount = formatAccountExpiry(account)
+      return {
+        ...formattedAccount,
+        groupInfos,
+        usage: {
+          daily: usageStats.daily,
+          total: usageStats.total,
+          monthly: usageStats.monthly
+        }
+      }
+    })
 
     logger.info(`获取 OpenAI 账户列表: ${accountsWithStats.length} 个账户`)
 
