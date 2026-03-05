@@ -3521,8 +3521,9 @@ const loadAccounts = async (forceReload = false) => {
 // 异步加载 OpenAI 账户当前页的 Usage Stats
 const _openaiUsageLoadedIds = new Set()
 const loadOpenAIUsageForVisiblePage = async () => {
-  const visibleOpenAI = paginatedAccounts.value
-    .filter((acc) => acc.platform === 'openai' && !acc.usage && !_openaiUsageLoadedIds.has(acc.id))
+  const visibleOpenAI = paginatedAccounts.value.filter(
+    (acc) => acc.platform === 'openai' && !acc.usage && !_openaiUsageLoadedIds.has(acc.id)
+  )
   if (visibleOpenAI.length === 0) return
 
   const ids = visibleOpenAI.map((acc) => acc.id)
