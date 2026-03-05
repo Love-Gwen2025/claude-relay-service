@@ -260,47 +260,65 @@ router.get('/', authenticateAdmin, async (req, res) => {
       }
     }
 
-    // 批量获取所有账户的使用统计（避免 N+1 查询）
-    const filteredAccountIds = accounts.map((a) => a.id)
-    const createdAtMap = new Map()
-    accounts.forEach((a) => createdAtMap.set(a.id, a.createdAt))
-    const usageStatsMap = await redis.batchGetAccountUsageStats(
-      filteredAccountIds,
-      'openai',
-      createdAtMap
-    )
-
-    // 为每个账户添加使用统计信息
-    const accountsWithStats = accounts.map((account) => {
-      const usageStats = usageStatsMap.get(account.id) || {
-        total: { tokens: 0, requests: 0, allTokens: 0 },
-        daily: { tokens: 0, requests: 0, allTokens: 0, cost: 0 },
-        monthly: { tokens: 0, requests: 0, allTokens: 0 }
-      }
+    // 不在列表接口中查询 usage stats（最耗时的部分）
+    // 前端通过 POST /openai-accounts/usage-stats 按需加载当前页的 stats
+    const accountsWithGroups = accounts.map((account) => {
       const groupInfos = accountGroupsMap.get(account.id) || []
       const formattedAccount = formatAccountExpiry(account)
       return {
         ...formattedAccount,
-        groupInfos,
-        usage: {
-          daily: usageStats.daily,
-          total: usageStats.total,
-          monthly: usageStats.monthly
-        }
+        groupInfos
       }
     })
 
-    logger.info(`获取 OpenAI 账户列表: ${accountsWithStats.length} 个账户`)
-
     return res.json({
       success: true,
-      data: accountsWithStats
+      data: accountsWithGroups
     })
   } catch (error) {
     logger.error('获取 OpenAI 账户列表失败:', error)
     return res.status(500).json({
       success: false,
       message: '获取账户列表失败',
+      error: error.message
+    })
+  }
+})
+
+// 批量获取账户使用统计（前端按需调用，只查当前页的账户）
+router.post('/usage-stats', authenticateAdmin, async (req, res) => {
+  try {
+    const { accountIds } = req.body
+    if (!Array.isArray(accountIds) || accountIds.length === 0) {
+      return res.json({ success: true, data: {} })
+    }
+
+    // 限制单次最多查询 100 个账户
+    const ids = accountIds.slice(0, 100)
+
+    const usageStatsMap = await redis.batchGetAccountUsageStats(ids, 'openai')
+
+    // 转换为普通对象返回
+    const stats = {}
+    for (const id of ids) {
+      const usageStats = usageStatsMap.get(id) || {
+        total: { tokens: 0, requests: 0, allTokens: 0 },
+        daily: { tokens: 0, requests: 0, allTokens: 0, cost: 0 },
+        monthly: { tokens: 0, requests: 0, allTokens: 0 }
+      }
+      stats[id] = {
+        daily: usageStats.daily,
+        total: usageStats.total,
+        monthly: usageStats.monthly
+      }
+    }
+
+    return res.json({ success: true, data: stats })
+  } catch (error) {
+    logger.error('获取 OpenAI 账户使用统计失败:', error)
+    return res.status(500).json({
+      success: false,
+      message: '获取使用统计失败',
       error: error.message
     })
   }

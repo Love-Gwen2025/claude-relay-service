@@ -1782,13 +1782,6 @@ const requestLogger = (req, res, next) => {
     })
   }
 
-  // 拦截 res.json() 捕获响应体
-  const originalJson = res.json.bind(res)
-  res.json = (body) => {
-    res._responseBody = body
-    return originalJson(body)
-  }
-
   res.on('finish', () => {
     if (req.originalUrl === '/health') {
       return
@@ -1807,20 +1800,27 @@ const requestLogger = (req, res, next) => {
     // 构建树形 metadata
     const meta = { requestId }
 
-    // 请求体（非 GET 且有内容时显示）
-    if (req.method !== 'GET' && req.body && Object.keys(req.body).length > 0) {
-      meta.req = req.body
+    // 请求体摘要（只记录关键字段，避免序列化完整 prompt/messages）
+    if (req.method !== 'GET' && req.body && typeof req.body === 'object') {
+      const b = req.body
+      const summary = {}
+      if (b.model) summary.model = b.model
+      if (b.stream !== undefined) summary.stream = b.stream
+      if (b.max_tokens) summary.max_tokens = b.max_tokens
+      if (b.max_output_tokens) summary.max_output_tokens = b.max_output_tokens
+      if (b.reasoning_effort) summary.reasoning_effort = b.reasoning_effort
+      if (b.temperature !== undefined) summary.temperature = b.temperature
+      if (Array.isArray(b.messages)) summary.messages_count = b.messages.length
+      if (Array.isArray(b.input)) summary.input_count = b.input.length
+      if (Object.keys(summary).length > 0) {
+        meta.req = summary
+      }
     }
 
     // 查询参数（GET 请求且有查询参数时单独显示）
     const queryIdx = req.originalUrl.indexOf('?')
     if (queryIdx > -1) {
       meta.query = req.originalUrl.substring(queryIdx + 1)
-    }
-
-    // 响应体
-    if (res._responseBody) {
-      meta.res = res._responseBody
     }
 
     // API Key 信息（合并到同一条日志）

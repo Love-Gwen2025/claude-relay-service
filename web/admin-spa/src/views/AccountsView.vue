@@ -3503,6 +3503,10 @@ const loadAccounts = async (forceReload = false) => {
       })
     }
 
+    // 异步加载 OpenAI 账户的 usage stats（按当前可见页）
+    _openaiUsageLoadedIds.clear()
+    loadOpenAIUsageForVisiblePage()
+
     // 异步加载余额缓存（按平台批量）
     loadBalanceCacheForAccounts().catch((err) => {
       console.debug('Balance cache loading failed:', err)
@@ -3511,6 +3515,31 @@ const loadAccounts = async (forceReload = false) => {
     showToast('加载账户失败', 'error')
   } finally {
     accountsLoading.value = false
+  }
+}
+
+// 异步加载 OpenAI 账户当前页的 Usage Stats
+const _openaiUsageLoadedIds = new Set()
+const loadOpenAIUsageForVisiblePage = async () => {
+  const visibleOpenAI = paginatedAccounts.value
+    .filter((acc) => acc.platform === 'openai' && !acc.usage && !_openaiUsageLoadedIds.has(acc.id))
+  if (visibleOpenAI.length === 0) return
+
+  const ids = visibleOpenAI.map((acc) => acc.id)
+  try {
+    const response = await httpApis.getOpenAIAccountsUsageStatsApi(ids)
+    if (response.success && response.data) {
+      const statsMap = response.data
+      ids.forEach((id) => _openaiUsageLoadedIds.add(id))
+      accounts.value = accounts.value.map((account) => {
+        if (account.platform === 'openai' && statsMap[account.id]) {
+          return { ...account, usage: statsMap[account.id] }
+        }
+        return account
+      })
+    }
+  } catch (err) {
+    console.debug('OpenAI usage stats loading failed:', err)
   }
 }
 
@@ -5117,6 +5146,8 @@ watch(currentPage, () => {
 
 watch(paginatedAccounts, () => {
   updateSelectAllState()
+  // 翻页时加载新页的 OpenAI usage stats
+  loadOpenAIUsageForVisiblePage()
   // 数据变化后重新检测是否需要横向滚动
   nextTick(() => {
     checkHorizontalScroll()

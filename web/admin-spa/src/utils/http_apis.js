@@ -165,6 +165,8 @@ export const updateGeminiApiAccountApi = (id, data) =>
 
 // OpenAI 账户
 export const getOpenAIAccountsApi = () => request({ url: '/admin/openai-accounts', method: 'GET' })
+export const getOpenAIAccountsUsageStatsApi = (accountIds) =>
+  request({ url: '/admin/openai-accounts/usage-stats', method: 'POST', data: { accountIds } })
 export const createOpenAIAccountApi = (data) =>
   request({ url: '/admin/openai-accounts', method: 'POST', data })
 export const updateOpenAIAccountApi = (id, data) =>

@@ -679,35 +679,75 @@ async function deleteAccount(accountId) {
 }
 
 // 获取所有账户
+// 列表展示需要的全部字段（跳过 idToken ~4KB，其余保留）
+// accessToken(~3.8KB) 和 openaiOauth(~353B) 虽然也不需要展示原文，但需要判断存在性，
+// 且 hmget 无法只读部分内容，这里直接读取后在代码中置为 mask 标记
+const LIST_FIELDS = [
+  // 基本信息
+  'id', 'name', 'email', 'description', 'status', 'isActive', 'schedulable',
+  'accountType', 'priority', 'proxy', 'platform', 'scopes',
+  // 时间
+  'createdAt', 'lastUsedAt', 'updatedAt', 'expiresAt', 'subscriptionExpiresAt', 'lastRefresh',
+  // 限流
+  'rateLimitedAt', 'rateLimitStatus', 'rateLimitDuration', 'rateLimitResetAt',
+  // 账户属性
+  'disableAutoProtection', 'planType', 'organizationId', 'organizationTitle',
+  'chatgptUserId', 'emailVerified', 'organizationRole', 'accountId', 'groupId',
+  // codex usage
+  'codexPrimaryUsedPercent', 'codexPrimaryResetAfterSeconds', 'codexPrimaryWindowMinutes',
+  'codexSecondaryUsedPercent', 'codexSecondaryResetAfterSeconds', 'codexSecondaryWindowMinutes',
+  'codexPrimaryOverSecondaryLimitPercent', 'codexUsageUpdatedAt',
+  // token 存在性判断（读出后仅用于生成 mask 标记）
+  'accessToken', 'refreshToken', 'openaiOauth',
+]
+
 async function getAllAccounts() {
-  const _client = redisClient.getClientSafe()
+  const client = redisClient.getClientSafe()
   const accountIds = await redisClient.getAllIdsByIndex(
     'openai:account:index',
     `${OPENAI_ACCOUNT_KEY_PREFIX}*`,
     /^openai:account:(.+)$/
   )
-  const keys = accountIds.map((id) => `${OPENAI_ACCOUNT_KEY_PREFIX}${id}`)
-  const accounts = []
-  const dataList = await redisClient.batchHgetallChunked(keys)
 
-  for (let i = 0; i < keys.length; i++) {
-    const accountData = dataList[i]
-    if (accountData && Object.keys(accountData).length > 0) {
+  if (accountIds.length === 0) return []
+
+  const allFields = LIST_FIELDS
+  const accounts = []
+
+  // 分批 hmget（每批 500 个账户）
+  const chunkSize = 500
+  for (let c = 0; c < accountIds.length; c += chunkSize) {
+    const chunk = accountIds.slice(c, c + chunkSize)
+    const pipeline = client.pipeline()
+    for (const id of chunk) {
+      pipeline.hmget(`${OPENAI_ACCOUNT_KEY_PREFIX}${id}`, ...allFields)
+    }
+    const results = await pipeline.exec()
+
+    for (let i = 0; i < chunk.length; i++) {
+      const [err, values] = results[i]
+      if (err || !values || !values[0]) continue
+
+      // 将数组结果映射为对象
+      const accountData = {}
+      for (let f = 0; f < allFields.length; f++) {
+        if (values[f] !== null) accountData[allFields[f]] = values[f]
+      }
+
       const codexUsage = buildCodexUsageSnapshot(accountData)
 
-      // 解密敏感数据（但不返回给前端）
+      // 解密 email
       if (accountData.email) {
         accountData.email = decrypt(accountData.email)
       }
 
-      // 先保存 refreshToken 是否存在的标记
+      // token 存在标记
       const hasRefreshTokenFlag = !!accountData.refreshToken
       const maskedAccessToken = accountData.accessToken ? '[ENCRYPTED]' : ''
       const maskedRefreshToken = accountData.refreshToken ? '[ENCRYPTED]' : ''
       const maskedOauth = accountData.openaiOauth ? '[ENCRYPTED]' : ''
 
-      // 屏蔽敏感信息（token等不应该返回给前端）
-      delete accountData.idToken
+      // 移除原始 token 值和 codex 原始字段
       delete accountData.accessToken
       delete accountData.refreshToken
       delete accountData.openaiOauth
@@ -718,20 +758,14 @@ async function getAllAccounts() {
       delete accountData.codexSecondaryResetAfterSeconds
       delete accountData.codexSecondaryWindowMinutes
       delete accountData.codexPrimaryOverSecondaryLimitPercent
-      // 时间戳改由 codexUsage.updatedAt 暴露
       delete accountData.codexUsageUpdatedAt
 
-      // 获取限流状态信息
+      // 获取限流状态信息（直接用已读数据，不再查 Redis）
       const rateLimitInfo = await getAccountRateLimitInfo(accountData.id, accountData)
 
       // 解析代理配置
       if (accountData.proxy) {
-        try {
-          accountData.proxy = JSON.parse(accountData.proxy)
-        } catch (e) {
-          // 如果解析失败，设置为null
-          accountData.proxy = null
-        }
+        try { accountData.proxy = JSON.parse(accountData.proxy) } catch { accountData.proxy = null }
       }
 
       const tokenExpiresAt = accountData.expiresAt || null
@@ -740,7 +774,6 @@ async function getAllAccounts() {
           ? accountData.subscriptionExpiresAt
           : null
 
-      // 不解密敏感字段，只返回基本信息
       accounts.push({
         ...accountData,
         isActive: accountData.isActive === 'true',
@@ -748,19 +781,12 @@ async function getAllAccounts() {
         openaiOauth: maskedOauth,
         accessToken: maskedAccessToken,
         refreshToken: maskedRefreshToken,
-
-        // ✅ 前端显示订阅过期时间（业务字段）
         tokenExpiresAt,
         subscriptionExpiresAt,
         expiresAt: subscriptionExpiresAt,
-
-        // 添加 scopes 字段用于判断认证方式
-        // 处理空字符串的情况
         scopes:
           accountData.scopes && accountData.scopes.trim() ? accountData.scopes.split(' ') : [],
-        // 添加 hasRefreshToken 标记
         hasRefreshToken: hasRefreshTokenFlag,
-        // 添加限流状态信息（统一格式）
         rateLimitStatus: rateLimitInfo
           ? {
               status: rateLimitInfo.status,
