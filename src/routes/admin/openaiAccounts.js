@@ -230,7 +230,9 @@ router.post('/exchange-code', authenticateAdmin, async (req, res) => {
 router.get('/', authenticateAdmin, async (req, res) => {
   try {
     const { platform, groupId } = req.query
+    const t0 = Date.now()
     let accounts = await openaiAccountService.getAllAccounts()
+    const t1 = Date.now()
 
     // 根据查询参数进行筛选
     if (platform && platform !== 'all' && platform !== 'openai') {
@@ -244,6 +246,8 @@ router.get('/', authenticateAdmin, async (req, res) => {
       allAccountIds,
       'openai'
     )
+    const t2 = Date.now()
+    logger.debug(`📊 OpenAI accounts list: getAllAccounts=${t1 - t0}ms, batchGroups=${t2 - t1}ms, total=${t2 - t0}ms, count=${accounts.length}`)
 
     // 如果指定了分组筛选
     if (groupId && groupId !== 'all') {

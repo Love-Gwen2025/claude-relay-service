@@ -19,6 +19,7 @@ class AccountGroupService {
     try {
       const client = redis.getClientSafe()
       if (!client) {
+        logger.warn('📁 ensureReverseIndexes: Redis client not available, skipping')
         return
       }
 
@@ -567,30 +568,34 @@ class AccountGroupService {
         }
       }
 
-      // 对于反向索引为空的账户，单独查询并补建索引（处理部分缺失情况）
-      const emptyIndexAccountIds = []
-      for (const accountId of accountIds) {
-        const ids = accountGroupIdsMap.get(accountId) || []
-        if (ids.length === 0) {
-          emptyIndexAccountIds.push(accountId)
+      // 反向索引已迁移时，空索引 = 账户确实没有分组，无需逐个补查
+      // 仅在未迁移时才尝试补建（限制数量避免 N+1）
+      const migrated = await client.get(this.REVERSE_INDEX_MIGRATED_KEY)
+      if (migrated !== 'true') {
+        const emptyIndexAccountIds = []
+        for (const accountId of accountIds) {
+          const ids = accountGroupIdsMap.get(accountId) || []
+          if (ids.length === 0) {
+            emptyIndexAccountIds.push(accountId)
+          }
         }
-      }
-      if (emptyIndexAccountIds.length > 0 && emptyIndexAccountIds.length < accountIds.length) {
-        // 部分账户索引缺失，逐个查询并补建
-        for (const accountId of emptyIndexAccountIds) {
-          try {
-            const groups = await this.getAccountGroups(accountId)
-            if (groups.length > 0) {
-              const groupIds = groups.map((g) => g.id)
-              accountGroupIdsMap.set(accountId, groupIds)
-              groupIds.forEach((id) => uniqueGroupIds.add(id))
-              // 异步补建反向索引
-              client
-                .sadd(`${this.REVERSE_INDEX_PREFIX}${platform}:${accountId}`, ...groupIds)
-                .catch(() => {})
+        // 限制最多补查 50 个，避免大量账户时阻塞
+        const toCheck = emptyIndexAccountIds.slice(0, 50)
+        if (toCheck.length > 0) {
+          for (const accountId of toCheck) {
+            try {
+              const groups = await this.getAccountGroups(accountId)
+              if (groups.length > 0) {
+                const groupIds = groups.map((g) => g.id)
+                accountGroupIdsMap.set(accountId, groupIds)
+                groupIds.forEach((id) => uniqueGroupIds.add(id))
+                client
+                  .sadd(`${this.REVERSE_INDEX_PREFIX}${platform}:${accountId}`, ...groupIds)
+                  .catch(() => {})
+              }
+            } catch {
+              // 忽略错误，保持空数组
             }
-          } catch {
-            // 忽略错误，保持空数组
           }
         }
       }
