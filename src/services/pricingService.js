@@ -66,7 +66,7 @@ class PricingService {
         this.checkAndUpdatePricing()
       }, this.updateInterval)
 
-      // 设置哈希轮询
+      // 设置哈希轮询1
       this.setupHashCheck()
 
       // 设置文件监听器
