@@ -3,6 +3,7 @@ const openaiResponsesAccountService = require('../account/openaiResponsesAccount
 const accountGroupService = require('../accountGroupService')
 const redis = require('../../models/redis')
 const logger = require('../../utils/logger')
+const config = require('../../../config/config')
 const { isSchedulable, sortAccountsByPriority } = require('../../utils/commonHelper')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
 
@@ -282,14 +283,27 @@ class UnifiedOpenAIScheduler {
             mappedAccount.accountType
           )
           if (isAvailable) {
-            // 🚀 智能会话续期（续期 unified 映射键，按配置）
-            await this._extendSessionMappingTTL(sessionHash)
-            logger.info(
-              `🎯 Using sticky session account: ${mappedAccount.accountId} (${mappedAccount.accountType}) for session ${sessionHash}`
+            // 额度阈值检查：如果账户日额度使用率达到阈值，解绑粘性会话并切换账户
+            const isQuotaNearLimit = await this._isAccountQuotaNearLimit(
+              mappedAccount.accountId,
+              mappedAccount.accountType
             )
-            // 更新账户的最后使用时间
-            await this.updateAccountLastUsed(mappedAccount.accountId, mappedAccount.accountType)
-            return mappedAccount
+            if (isQuotaNearLimit) {
+              logger.info(
+                `💸 Account ${mappedAccount.accountId} (${mappedAccount.accountType}) quota usage reached threshold, removing sticky session for ${sessionHash}`
+              )
+              await this._deleteSessionMapping(sessionHash)
+              // 不 return，继续走下面的池选择逻辑
+            } else {
+              // 🚀 智能会话续期（续期 unified 映射键，按配置）
+              await this._extendSessionMappingTTL(sessionHash)
+              logger.info(
+                `🎯 Using sticky session account: ${mappedAccount.accountId} (${mappedAccount.accountType}) for session ${sessionHash}`
+              )
+              // 更新账户的最后使用时间
+              await this.updateAccountLastUsed(mappedAccount.accountId, mappedAccount.accountType)
+              return mappedAccount
+            }
           } else {
             logger.warn(
               `⚠️ Mapped account ${mappedAccount.accountId} is no longer available, selecting new account`
@@ -317,8 +331,8 @@ class UnifiedOpenAIScheduler {
         }
       }
 
-      // 按优先级和最后使用时间排序（与 Claude/Gemini 调度保持一致）
-      const sortedAccounts = sortAccountsByPriority(availableAccounts)
+      // 按优先级排序，同优先级内按额度使用率升序（额度充裕的优先）
+      const sortedAccounts = await this._sortAccountsWithQuotaAwareness(availableAccounts)
 
       // 选择第一个账户
       const selectedAccount = sortedAccounts[0]
@@ -598,6 +612,154 @@ class UnifiedOpenAIScheduler {
     } catch (error) {
       logger.warn(`⚠️ Failed to check account availability: ${accountId}`, error)
       return false
+    }
+  }
+
+  // 💸 获取单个账户的额度使用率百分比（用于排序）
+  _getAccountQuotaUsagePercent(account) {
+    if (!account) {
+      return -1
+    }
+
+    if (account.accountType === 'openai') {
+      // codex usage 数据在 getAllAccounts 返回中已被移到 codexUsage 嵌套对象
+      const usage = account.codexUsage
+      if (!usage) {
+        return -1
+      }
+      const primary = usage.primary?.usedPercent
+      const secondary = usage.secondary?.usedPercent
+      const hasPrimary = Number.isFinite(primary)
+      const hasSecondary = Number.isFinite(secondary) && secondary > 0
+      if (!hasPrimary && !hasSecondary) {
+        return -1
+      }
+      // 取两个维度中较高的百分比（Free号只有primary=周限额，Plus/Team号primary=5h+secondary=周限额）
+      return Math.max(hasPrimary ? primary : 0, hasSecondary ? secondary : 0)
+    }
+
+    if (account.accountType === 'openai-responses') {
+      const dailyQuota = parseFloat(account.dailyQuota) || 0
+      if (dailyQuota <= 0) {
+        return -1 // 无额度限制
+      }
+      const today = redis.getDateStringInTimezone()
+      if (account.lastResetDate !== today) {
+        return 0 // 已重置
+      }
+      const dailyUsage = parseFloat(account.dailyUsage) || 0
+      return (dailyUsage / dailyQuota) * 100
+    }
+
+    return -1
+  }
+
+  // 💸 额度感知排序：未达阈值的优先，同档内保留 priority → lastUsedAt 原始轮转
+  async _sortAccountsWithQuotaAwareness(accounts) {
+    const sorted = sortAccountsByPriority(accounts)
+
+    const threshold = config.session?.quotaSwitchThresholdPercent || 0
+    if (threshold <= 0) {
+      return sorted // 功能未启用，直接返回原排序
+    }
+
+    // 分两档：未达阈值（含无数据）为优先档，已达阈值为降级档
+    const preferred = []
+    const degraded = []
+
+    for (const acc of sorted) {
+      const usage = this._getAccountQuotaUsagePercent(acc)
+      if (usage >= 0 && usage >= threshold) {
+        degraded.push(acc)
+      } else {
+        preferred.push(acc) // usage === -1（无数据/无限制）或 usage < threshold
+      }
+    }
+
+    // 各档内保留 sortAccountsByPriority 的原始顺序（priority → lastUsedAt → createdAt）
+    return [...preferred, ...degraded]
+  }
+
+  // 💸 检查账户日额度使用率是否达到切换阈值
+  async _isAccountQuotaNearLimit(accountId, accountType) {
+    try {
+      const threshold = config.session?.quotaSwitchThresholdPercent || 0
+      if (threshold <= 0) {
+        return false
+      }
+
+      // openai (Codex CLI) 类型：取 primary 和 secondary 中较高的百分比
+      // Free号: primary=周限额, secondary=无; Plus/Team号: primary=5h限额, secondary=周限额
+      // 注意：直接从 Redis 读取 codex usage 字段，因为 getAccount() 会删除这些字段（安全屏蔽）
+      if (accountType === 'openai') {
+        const client = redis.getClientSafe()
+        const fields = await client.hmget(
+          `openai:account:${accountId}`,
+          'codexPrimaryUsedPercent',
+          'codexSecondaryUsedPercent',
+          'name'
+        )
+        const [rawPrimary, rawSecondary, accountName] = fields
+
+        const primary = parseFloat(rawPrimary)
+        const secondary = parseFloat(rawSecondary)
+        const hasPrimary = Number.isFinite(primary)
+        const hasSecondary = Number.isFinite(secondary) && secondary > 0
+
+        if (!hasPrimary && !hasSecondary) {
+          return false // 没有使用率数据，不限制
+        }
+
+        const maxUsedPercent = Math.max(hasPrimary ? primary : 0, hasSecondary ? secondary : 0)
+
+        if (maxUsedPercent >= threshold) {
+          const detail = hasSecondary
+            ? `primary=${(hasPrimary ? primary : 0).toFixed(1)}%, secondary=${secondary.toFixed(1)}%`
+            : `primary=${(hasPrimary ? primary : 0).toFixed(1)}%`
+          logger.info(
+            `💸 Codex account ${accountName || accountId} (${accountId}) usage ${maxUsedPercent.toFixed(1)}% >= ${threshold}% threshold (${detail})`
+          )
+          return true
+        }
+
+        return false
+      }
+
+      // openai-responses 类型：通过 dailyQuota / dailyUsage 判断
+      if (accountType === 'openai-responses') {
+        const account = await openaiResponsesAccountService.getAccount(accountId)
+        if (!account) {
+          return false
+        }
+
+        const dailyQuota = parseFloat(account.dailyQuota) || 0
+        if (dailyQuota <= 0) {
+          return false // 未设置额度限制
+        }
+
+        // 日期重置检查：如果 lastResetDate 不是今天，说明额度已重置
+        const today = redis.getDateStringInTimezone()
+        if (account.lastResetDate !== today) {
+          return false
+        }
+
+        const dailyUsage = parseFloat(account.dailyUsage) || 0
+        const percentage = (dailyUsage / dailyQuota) * 100
+
+        if (percentage >= threshold) {
+          logger.info(
+            `💸 Account ${account.name} (${accountId}) quota usage ${percentage.toFixed(1)}% >= ${threshold}% threshold (${dailyUsage.toFixed(2)}/${dailyQuota.toFixed(2)} USD)`
+          )
+          return true
+        }
+
+        return false
+      }
+
+      return false
+    } catch (error) {
+      logger.warn(`⚠️ Failed to check quota for account ${accountId}: ${error.message}`)
+      return false // 检查失败不阻断调度
     }
   }
 
@@ -951,8 +1113,8 @@ class UnifiedOpenAIScheduler {
         throw error
       }
 
-      // 按优先级和最后使用时间排序（与 Claude/Gemini 调度保持一致）
-      const sortedAccounts = sortAccountsByPriority(availableAccounts)
+      // 按优先级排序，同优先级内按额度使用率升序（额度充裕的优先）
+      const sortedAccounts = await this._sortAccountsWithQuotaAwareness(availableAccounts)
 
       // 选择第一个账户
       const selectedAccount = sortedAccounts[0]

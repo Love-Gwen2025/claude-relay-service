@@ -267,7 +267,7 @@ const handleResponses = async (req, res) => {
       const keyId = apiKeyData.id || apiKeyData.name || 'default'
 
       if (req.body?.instructions && typeof req.body.instructions === 'string') {
-        fallbackContent = keyId + ':' + req.body.instructions
+        fallbackContent = `${keyId}:${req.body.instructions}`
       } else {
         fallbackContent = keyId
       }
