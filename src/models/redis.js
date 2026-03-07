@@ -1400,6 +1400,31 @@ class RedisClient {
     const actualTotalTokens =
       finalInputTokens + finalOutputTokens + finalCacheCreateTokens + finalCacheReadTokens
     const coreTokens = finalInputTokens + finalOutputTokens
+    let aggregatedCost = 0
+
+    if (normalizedModel) {
+      try {
+        const CostCalculator = require('../utils/costCalculator')
+        const usage = {
+          input_tokens: finalInputTokens,
+          output_tokens: finalOutputTokens,
+          cache_creation_input_tokens: finalCacheCreateTokens,
+          cache_read_input_tokens: finalCacheReadTokens
+        }
+
+        if (finalEphemeral5mTokens > 0 || finalEphemeral1hTokens > 0) {
+          usage.cache_creation = {
+            ephemeral_5m_input_tokens: finalEphemeral5mTokens,
+            ephemeral_1h_input_tokens: finalEphemeral1hTokens
+          }
+        }
+
+        const costResult = CostCalculator.calculateCost(usage, normalizedModel)
+        aggregatedCost = Number(costResult?.costs?.total || 0)
+      } catch (error) {
+        logger.debug(`账户费用聚合失败: ${accountId}:${normalizedModel}`, error)
+      }
+    }
 
     // 构建统计操作数组
     const operations = [
@@ -1537,6 +1562,14 @@ class RedisClient {
       this.client.del(`account_usage:daily:index:${today}:empty`),
       this.client.del(`account_usage:model:daily:index:${today}:empty`)
     ]
+
+    if (aggregatedCost > 0) {
+      operations.push(
+        this.client.hincrbyfloat(accountKey, 'totalCost', aggregatedCost),
+        this.client.hincrbyfloat(accountDaily, 'cost', aggregatedCost),
+        this.client.hincrbyfloat(accountMonthly, 'cost', aggregatedCost)
+      )
+    }
 
     // 如果是 1M 上下文请求，添加额外的统计
     if (isLongContextRequest) {
@@ -1934,8 +1967,16 @@ class RedisClient {
 
   // 💰 计算账户的每日费用（基于模型使用，使用索引集合替代 KEYS）
   async getAccountDailyCost(accountId) {
-    const CostCalculator = require('../utils/costCalculator')
     const today = getDateStringInTimezone()
+    const accountDailyKey = `account_usage:daily:${accountId}:${today}`
+    const storedCost = await this.client.hget(accountDailyKey, 'cost')
+
+    if (storedCost !== null && storedCost !== undefined) {
+      const parsedCost = parseFloat(storedCost)
+      return Number.isFinite(parsedCost) ? parsedCost : 0
+    }
+
+    const CostCalculator = require('../utils/costCalculator')
 
     // 使用索引集合替代 KEYS 命令
     const indexKey = `account_usage:model:daily:index:${today}`
@@ -1990,6 +2031,10 @@ class RedisClient {
       }
     }
 
+    if (totalCost > 0) {
+      await this.client.hset(accountDailyKey, 'cost', totalCost)
+    }
+
     logger.debug(`💰 Account ${accountId} total daily cost: $${totalCost}`)
     return totalCost
   }
@@ -2000,15 +2045,37 @@ class RedisClient {
       return new Map()
     }
 
-    const CostCalculator = require('../utils/costCalculator')
     const today = getDateStringInTimezone()
+    const costMap = new Map(accountIds.map((id) => [id, 0]))
+    const storedCostPipeline = this.client.pipeline()
+    for (const accountId of accountIds) {
+      storedCostPipeline.hget(`account_usage:daily:${accountId}:${today}`, 'cost')
+    }
+    const storedCostResults = await storedCostPipeline.exec()
+
+    const missingAccountIds = []
+    for (let i = 0; i < accountIds.length; i += 1) {
+      const accountId = accountIds[i]
+      const [err, value] = storedCostResults[i] || []
+      if (!err && value !== null && value !== undefined) {
+        costMap.set(accountId, parseFloat(value) || 0)
+      } else {
+        missingAccountIds.push(accountId)
+      }
+    }
+
+    if (missingAccountIds.length === 0) {
+      return costMap
+    }
+
+    const CostCalculator = require('../utils/costCalculator')
 
     // 一次获取索引
     const indexKey = `account_usage:model:daily:index:${today}`
     const allEntries = await this.client.smembers(indexKey)
 
     // 按 accountId 分组
-    const accountIdSet = new Set(accountIds)
+    const accountIdSet = new Set(missingAccountIds)
     const entriesByAccount = new Map()
     for (const entry of allEntries) {
       const colonIndex = entry.indexOf(':')
@@ -2025,12 +2092,10 @@ class RedisClient {
       }
     }
 
-    const costMap = new Map(accountIds.map((id) => [id, 0]))
-
     // 如果索引为空，回退到 KEYS 命令（兼容旧数据）
     if (allEntries.length === 0) {
       logger.debug('💰 Daily cost index empty, falling back to KEYS for batch cost calculation')
-      for (const accountId of accountIds) {
+      for (const accountId of missingAccountIds) {
         try {
           const cost = await this.getAccountDailyCostFallback(accountId, today, CostCalculator)
           costMap.set(accountId, cost)
@@ -2197,7 +2262,7 @@ class RedisClient {
     const avgTPM = totalTokens / totalMinutes
 
     // 处理账户统计数据
-    const handleAccountData = (data) => {
+    const handleAccountData = (data, costFields = []) => {
       const tokens = parseInt(data.totalTokens) || parseInt(data.tokens) || 0
       const inputTokens = parseInt(data.totalInputTokens) || parseInt(data.inputTokens) || 0
       const outputTokens = parseInt(data.totalOutputTokens) || parseInt(data.outputTokens) || 0
@@ -2211,7 +2276,7 @@ class RedisClient {
       const actualAllTokens =
         allTokens || inputTokens + outputTokens + cacheCreateTokens + cacheReadTokens
 
-      return {
+      const result = {
         tokens,
         inputTokens,
         outputTokens,
@@ -2220,14 +2285,27 @@ class RedisClient {
         allTokens: actualAllTokens,
         requests
       }
+
+      for (const costField of costFields) {
+        if (Object.prototype.hasOwnProperty.call(data, costField)) {
+          const parsedCost = parseFloat(data[costField])
+          result.cost = Number.isFinite(parsedCost) ? parsedCost : 0
+          break
+        }
+      }
+
+      return result
     }
 
-    const totalData = handleAccountData(total)
-    const dailyData = handleAccountData(daily)
-    const monthlyData = handleAccountData(monthly)
+    const totalData = handleAccountData(total, ['totalCost', 'cost'])
+    const dailyData = handleAccountData(daily, ['cost', 'totalCost'])
+    const monthlyData = handleAccountData(monthly, ['cost', 'totalCost'])
 
     // 获取每日费用（基于模型使用）
-    const dailyCost = await this.getAccountDailyCost(accountId)
+    const dailyCost =
+      typeof dailyData.cost === 'number'
+        ? dailyData.cost
+        : await this.getAccountDailyCost(accountId)
 
     return {
       accountId,

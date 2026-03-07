@@ -11,9 +11,86 @@ const claudeRelayConfigService = require('../services/claudeRelayConfigService')
 const { calculateWaitTimeStats } = require('../utils/statsHelper')
 const { isClaudeFamilyModel } = require('../utils/modelHelper')
 
+const ADMIN_SESSION_CACHE_TTL_MS = 5000
+const ADMIN_SESSION_TOUCH_INTERVAL_MS = 60000
+const adminSessionCache = new Map()
+
 // 工具函数
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function getCachedAdminSession(token) {
+  const cached = adminSessionCache.get(token)
+  if (!cached) {
+    return null
+  }
+
+  if (cached.expiresAt <= Date.now()) {
+    adminSessionCache.delete(token)
+    return null
+  }
+
+  return { ...cached.session }
+}
+
+function setCachedAdminSession(token, session, lastTouchedAt = null) {
+  const touchedAt =
+    Number.isFinite(lastTouchedAt) && lastTouchedAt > 0
+      ? lastTouchedAt
+      : Date.parse(session?.lastActivity || session?.loginTime || '') || Date.now()
+
+  adminSessionCache.set(token, {
+    session: { ...session },
+    expiresAt: Date.now() + ADMIN_SESSION_CACHE_TTL_MS,
+    lastTouchedAt: touchedAt
+  })
+}
+
+function invalidateCachedAdminSession(token) {
+  adminSessionCache.delete(token)
+}
+
+async function getAdminSessionWithCache(token) {
+  const cachedSession = getCachedAdminSession(token)
+  if (cachedSession) {
+    return cachedSession
+  }
+
+  const adminSession = await Promise.race([
+    redis.getSession(token),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Session lookup timeout')), 5000))
+  ])
+
+  if (adminSession && Object.keys(adminSession).length > 0) {
+    setCachedAdminSession(token, adminSession)
+  }
+
+  return adminSession
+}
+
+function touchAdminSession(token, adminSession, now = new Date()) {
+  const nowMs = now.getTime()
+  const cached = adminSessionCache.get(token)
+  const lastTouchedAt =
+    cached?.lastTouchedAt ||
+    Date.parse(adminSession?.lastActivity || adminSession?.loginTime || '') ||
+    0
+
+  if (lastTouchedAt > 0 && nowMs - lastTouchedAt < ADMIN_SESSION_TOUCH_INTERVAL_MS) {
+    setCachedAdminSession(token, adminSession, lastTouchedAt)
+    return
+  }
+
+  const updatedSession = {
+    ...adminSession,
+    lastActivity: now.toISOString()
+  }
+
+  setCachedAdminSession(token, updatedSession, nowMs)
+  redis.setSession(token, updatedSession, 86400).catch((error) => {
+    logger.error('Failed to update admin session activity:', error)
+  })
 }
 
 /**
@@ -1383,14 +1460,10 @@ const authenticateAdmin = async (req, res, next) => {
     }
 
     // 获取管理员会话（带超时处理）
-    const adminSession = await Promise.race([
-      redis.getSession(token),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Session lookup timeout')), 5000)
-      )
-    ])
+    const adminSession = await getAdminSessionWithCache(token)
 
     if (!adminSession || Object.keys(adminSession).length === 0) {
+      invalidateCachedAdminSession(token)
       logger.security(`Invalid admin token attempt from ${req.ip || 'unknown'}`)
       return res.status(401).json({
         error: 'Invalid admin token',
@@ -1400,6 +1473,7 @@ const authenticateAdmin = async (req, res, next) => {
 
     // 🔒 安全修复：验证会话必须字段（防止伪造会话绕过认证）
     if (!adminSession.username || !adminSession.loginTime) {
+      invalidateCachedAdminSession(token)
       logger.security(
         `🔒 Corrupted admin session from ${req.ip || 'unknown'} - missing required fields (username: ${!!adminSession.username}, loginTime: ${!!adminSession.loginTime})`
       )
@@ -1417,6 +1491,7 @@ const authenticateAdmin = async (req, res, next) => {
     const maxInactivity = 24 * 60 * 60 * 1000 // 24小时
 
     if (inactiveDuration > maxInactivity) {
+      invalidateCachedAdminSession(token)
       logger.security(
         `🔒 Expired admin session for ${adminSession.username} from ${req.ip || 'unknown'}`
       )
@@ -1428,18 +1503,7 @@ const authenticateAdmin = async (req, res, next) => {
     }
 
     // 更新最后活动时间（异步，不阻塞请求）
-    redis
-      .setSession(
-        token,
-        {
-          ...adminSession,
-          lastActivity: now.toISOString()
-        },
-        86400
-      )
-      .catch((error) => {
-        logger.error('Failed to update admin session activity:', error)
-      })
+    touchAdminSession(token, adminSession, now)
 
     // 设置管理员信息（只包含必要信息）
     req.admin = {
@@ -1574,16 +1638,18 @@ const authenticateUserOrAdmin = async (req, res, next) => {
     // 优先尝试管理员认证
     if (adminToken) {
       try {
-        const adminSession = await redis.getSession(adminToken)
+        const adminSession = await getAdminSessionWithCache(adminToken)
         if (adminSession && Object.keys(adminSession).length > 0) {
           // 🔒 安全修复：验证会话必须字段（与 authenticateAdmin 保持一致）
           if (!adminSession.username || !adminSession.loginTime) {
+            invalidateCachedAdminSession(adminToken)
             logger.security(
               `🔒 Corrupted admin session in authenticateUserOrAdmin from ${req.ip || 'unknown'} - missing required fields (username: ${!!adminSession.username}, loginTime: ${!!adminSession.loginTime})`
             )
             await redis.deleteSession(adminToken) // 清理无效/伪造的会话
             // 不返回 401，继续尝试用户认证
           } else {
+            touchAdminSession(adminToken, adminSession)
             req.admin = {
               username: adminSession.username,
               sessionId: adminToken,
