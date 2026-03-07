@@ -529,14 +529,8 @@ class AccountBalanceService {
     try {
       const usageStats = await this.redis.getAccountUsageStats(accountId)
       const dailyCost = safeNumber(usageStats?.daily?.cost || 0)
-      const monthlyCost =
-        typeof usageStats?.monthly?.cost === 'number'
-          ? safeNumber(usageStats.monthly.cost)
-          : await this._computeMonthlyCost(accountId)
-      const totalCost =
-        typeof usageStats?.total?.cost === 'number'
-          ? safeNumber(usageStats.total.cost)
-          : await this._computeTotalCost(accountId)
+      const monthlyCost = await this._computeMonthlyCost(accountId)
+      const totalCost = await this._computeTotalCost(accountId)
 
       return {
         totalCost,
@@ -567,34 +561,12 @@ class AccountBalanceService {
     )}`
 
     const pattern = `account_usage:model:monthly:${accountId}:*:${currentMonth}`
-    const totalCost = await this._sumModelCostsByKeysPattern(pattern)
-    await this._persistMonthlyCost(accountId, currentMonth, totalCost)
-    return totalCost
+    return await this._sumModelCostsByKeysPattern(pattern)
   }
 
   async _computeTotalCost(accountId) {
     const pattern = `account_usage:model:monthly:${accountId}:*:*`
-    const totalCost = await this._sumModelCostsByKeysPattern(pattern)
-    await this._persistTotalCost(accountId, totalCost)
-    return totalCost
-  }
-
-  async _persistMonthlyCost(accountId, currentMonth, totalCost) {
-    try {
-      await this.redis
-        .getClientSafe()
-        .hset(`account_usage:monthly:${accountId}:${currentMonth}`, 'cost', totalCost)
-    } catch (error) {
-      this.logger.debug(`写入月费用聚合失败: ${accountId}:${currentMonth}`, error)
-    }
-  }
-
-  async _persistTotalCost(accountId, totalCost) {
-    try {
-      await this.redis.getClientSafe().hset(`account_usage:${accountId}`, 'totalCost', totalCost)
-    } catch (error) {
-      this.logger.debug(`写入总费用聚合失败: ${accountId}`, error)
-    }
+    return await this._sumModelCostsByKeysPattern(pattern)
   }
 
   async _sumModelCostsByKeysPattern(pattern) {
