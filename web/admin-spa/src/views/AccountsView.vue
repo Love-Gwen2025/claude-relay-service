@@ -3309,8 +3309,7 @@ const loadAccounts = async (forceReload = false) => {
 
     const platformsToFetch = getPlatformsForFilter(platformFilter.value)
 
-    // 使用缓存机制加载绑定计数和分组数据（不再加载完整的 API Keys 数据）
-    await Promise.all([loadBindingCounts(forceReload), loadAccountGroups(forceReload)])
+    preloadAccountsAuxiliaryData(forceReload)
 
     // 后端账户API已经包含分组信息，不需要单独加载分组成员关系
     // await loadGroupMembers(forceReload)
@@ -3476,25 +3475,16 @@ const loadAccounts = async (forceReload = false) => {
       }
     })
 
-    // 获取临时不可用状态并附加到账户数据
-    try {
-      const tempRes = await httpApis.getTempUnavailableApi()
-      if (tempRes?.success && tempRes.data) {
-        const tempStatuses = tempRes.data
-        filteredAccounts = filteredAccounts.map((account) => {
-          const tempStatus = resolveTempUnavailableStatusForAccount(tempStatuses, account)
-          if (tempStatus) {
-            return { ...account, tempUnavailable: tempStatus }
-          }
-          return account
-        })
-      }
-    } catch {
-      // 忽略错误，不影响账户列表显示
-    }
-
     accounts.value = filteredAccounts
     cleanupSelectedAccounts()
+
+    if (bindingCountsLoaded.value) {
+      applyBindingCountsToAccounts()
+    }
+
+    loadTempUnavailableForAccounts().catch((err) => {
+      console.debug('Temp unavailable loading failed:', err)
+    })
 
     // 异步加载 Claude OAuth 账户的 usage 数据
     if (filteredAccounts.some((acc) => acc.platform === 'claude')) {
@@ -3503,10 +3493,12 @@ const loadAccounts = async (forceReload = false) => {
       })
     }
 
-    // 异步加载余额缓存（按平台批量）
-    loadBalanceCacheForAccounts().catch((err) => {
-      console.debug('Balance cache loading failed:', err)
-    })
+    // 异步加载余额缓存（按平台批量），让列表优先渲染
+    setTimeout(() => {
+      loadBalanceCacheForAccounts().catch((err) => {
+        console.debug('Balance cache loading failed:', err)
+      })
+    }, 50)
   } catch (error) {
     showToast('加载账户失败', 'error')
   } finally {
@@ -3526,6 +3518,75 @@ const loadClaudeUsage = async () => {
       return account
     })
   }
+}
+
+const applyBindingCountsToAccounts = () => {
+  const counts = bindingCounts.value || {}
+
+  const resolveBoundApiKeysCount = (account) => {
+    switch (account.platform) {
+      case 'claude':
+        return counts.claudeAccountId?.[account.id] || 0
+      case 'claude-console':
+        return counts.claudeConsoleAccountId?.[account.id] || 0
+      case 'gemini':
+        return counts.geminiAccountId?.[account.id] || 0
+      case 'gemini-api':
+        return counts.geminiAccountId?.[`api:${account.id}`] || 0
+      case 'openai':
+        return counts.openaiAccountId?.[account.id] || 0
+      case 'openai-responses':
+        return counts.openaiAccountId?.[`responses:${account.id}`] || 0
+      case 'azure_openai':
+        return counts.azureOpenaiAccountId?.[account.id] || 0
+      case 'droid':
+        return counts.droidAccountId?.[account.id] || account.boundApiKeysCount || 0
+      default:
+        return account.boundApiKeysCount || 0
+    }
+  }
+
+  accounts.value = accounts.value.map((account) => ({
+    ...account,
+    boundApiKeysCount: resolveBoundApiKeysCount(account)
+  }))
+}
+
+const loadTempUnavailableForAccounts = async () => {
+  const tempRes = await httpApis.getTempUnavailableApi()
+  if (!tempRes?.success || !tempRes.data) {
+    return
+  }
+
+  const tempStatuses = tempRes.data
+  accounts.value = accounts.value.map((account) => {
+    const tempStatus = resolveTempUnavailableStatusForAccount(tempStatuses, account)
+    if (tempStatus) {
+      return { ...account, tempUnavailable: tempStatus }
+    }
+
+    if (account.tempUnavailable) {
+      const nextAccount = { ...account }
+      delete nextAccount.tempUnavailable
+      return nextAccount
+    }
+
+    return account
+  })
+}
+
+const preloadAccountsAuxiliaryData = (forceReload = false) => {
+  loadBindingCounts(forceReload)
+    .then(() => {
+      applyBindingCountsToAccounts()
+    })
+    .catch((error) => {
+      console.debug('Failed to load binding counts:', error)
+    })
+
+  loadAccountGroups(forceReload).catch((error) => {
+    console.debug('Failed to load account groups:', error)
+  })
 }
 
 // 记录上一次的排序字段，用于判断下拉选择是否是同一字段被再次选择

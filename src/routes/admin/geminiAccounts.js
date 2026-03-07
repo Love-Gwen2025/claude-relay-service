@@ -7,6 +7,12 @@ const { authenticateAdmin } = require('../../middleware/auth')
 const logger = require('../../utils/logger')
 const webhookNotifier = require('../../utils/webhookNotifier')
 const { formatAccountExpiry, mapExpiryField } = require('./utils')
+const {
+  buildAccountUsageMap,
+  buildAccountGroupInfoMap,
+  filterAccountsByGroupInfos,
+  getEmptyUsage
+} = require('./accountListUtils')
 
 const router = express.Router()
 
@@ -163,78 +169,23 @@ router.get('/', authenticateAdmin, async (req, res) => {
       accounts = []
     }
 
-    // 如果指定了分组筛选
-    if (groupId && groupId !== 'all') {
-      if (groupId === 'ungrouped') {
-        // 筛选未分组账户
-        const filteredAccounts = []
-        for (const account of accounts) {
-          const groups = await accountGroupService.getAccountGroups(account.id)
-          if (!groups || groups.length === 0) {
-            filteredAccounts.push(account)
-          }
+    const allGroupInfosMap = await buildAccountGroupInfoMap(accountGroupService, accounts, 'gemini')
+    accounts = filterAccountsByGroupInfos(accounts, allGroupInfosMap, groupId)
+
+    const usageStatsMap = await buildAccountUsageMap(accounts)
+    const accountsWithStats = accounts.map((account) => {
+      const formattedAccount = formatAccountExpiry(account)
+      const usage = usageStatsMap.get(account.id) || getEmptyUsage()
+      return {
+        ...formattedAccount,
+        groupInfos: allGroupInfosMap.get(account.id) || [],
+        usage: {
+          daily: usage.daily,
+          total: usage.total,
+          averages: usage.averages
         }
-        accounts = filteredAccounts
-      } else {
-        // 筛选特定分组的账户
-        const groupMembers = await accountGroupService.getGroupMembers(groupId)
-        accounts = accounts.filter((account) => groupMembers.includes(account.id))
       }
-    }
-
-    // 为每个账户添加使用统计信息（与Claude账户相同的逻辑）
-    const accountsWithStats = await Promise.all(
-      accounts.map(async (account) => {
-        try {
-          const usageStats = await redis.getAccountUsageStats(account.id, 'openai')
-          const groupInfos = await accountGroupService.getAccountGroups(account.id)
-
-          const formattedAccount = formatAccountExpiry(account)
-          return {
-            ...formattedAccount,
-            groupInfos,
-            usage: {
-              daily: usageStats.daily,
-              total: usageStats.total,
-              averages: usageStats.averages
-            }
-          }
-        } catch (statsError) {
-          logger.warn(
-            `⚠️ Failed to get usage stats for Gemini account ${account.id}:`,
-            statsError.message
-          )
-          // 如果获取统计失败，返回空统计
-          try {
-            const groupInfos = await accountGroupService.getAccountGroups(account.id)
-            const formattedAccount = formatAccountExpiry(account)
-            return {
-              ...formattedAccount,
-              groupInfos,
-              usage: {
-                daily: { tokens: 0, requests: 0, allTokens: 0 },
-                total: { tokens: 0, requests: 0, allTokens: 0 },
-                averages: { rpm: 0, tpm: 0 }
-              }
-            }
-          } catch (groupError) {
-            logger.warn(
-              `⚠️ Failed to get group info for account ${account.id}:`,
-              groupError.message
-            )
-            return {
-              ...account,
-              groupInfos: [],
-              usage: {
-                daily: { tokens: 0, requests: 0, allTokens: 0 },
-                total: { tokens: 0, requests: 0, allTokens: 0 },
-                averages: { rpm: 0, tpm: 0 }
-              }
-            }
-          }
-        }
-      })
-    )
+    })
 
     return res.json({ success: true, data: accountsWithStats })
   } catch (error) {
