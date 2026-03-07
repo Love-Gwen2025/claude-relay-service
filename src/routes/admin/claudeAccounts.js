@@ -15,6 +15,7 @@ const redis = require('../../models/redis')
 const { authenticateAdmin } = require('../../middleware/auth')
 const logger = require('../../utils/logger')
 const oauthHelper = require('../../utils/oauthHelper')
+const CostCalculator = require('../../utils/costCalculator')
 const webhookNotifier = require('../../utils/webhookNotifier')
 const {
   isEmptyValue,
@@ -22,12 +23,6 @@ const {
   normalizeOptionalNonNegativeInteger
 } = require('../../utils/tempUnavailablePolicy')
 const { formatAccountExpiry, mapExpiryField } = require('./utils')
-const {
-  buildAccountUsageMap,
-  buildAccountGroupInfoMap,
-  filterAccountsByGroupInfos,
-  getEmptyUsage
-} = require('./accountListUtils')
 
 const TEMP_UNAVAILABLE_TTL_FIELDS = ['tempUnavailable503TtlSeconds', 'tempUnavailable5xxTtlSeconds']
 
@@ -406,25 +401,129 @@ router.get('/claude-accounts', authenticateAdmin, async (req, res) => {
       accounts = []
     }
 
-    const allGroupInfosMap = await buildAccountGroupInfoMap(accountGroupService, accounts, 'claude')
-    accounts = filterAccountsByGroupInfos(accounts, allGroupInfosMap, groupId)
-
-    const usageStatsMap = await buildAccountUsageMap(accounts)
-    const accountsWithStats = accounts.map((account) => {
-      const formattedAccount = formatAccountExpiry(account)
-      const usage = usageStatsMap.get(account.id) || getEmptyUsage()
-      return {
-        ...formattedAccount,
-        schedulable: account.schedulable === 'true' || account.schedulable === true,
-        groupInfos: allGroupInfosMap.get(account.id) || [],
-        usage: {
-          daily: usage.daily,
-          total: usage.total,
-          averages: usage.averages,
-          sessionWindow: null
+    // 如果指定了分组筛选
+    if (groupId && groupId !== 'all') {
+      if (groupId === 'ungrouped') {
+        // 筛选未分组账户
+        const filteredAccounts = []
+        for (const account of accounts) {
+          const groups = await accountGroupService.getAccountGroups(account.id)
+          if (!groups || groups.length === 0) {
+            filteredAccounts.push(account)
+          }
         }
+        accounts = filteredAccounts
+      } else {
+        // 筛选特定分组的账户
+        const groupMembers = await accountGroupService.getGroupMembers(groupId)
+        accounts = accounts.filter((account) => groupMembers.includes(account.id))
       }
-    })
+    }
+
+    // 为每个账户添加使用统计信息
+    const accountsWithStats = await Promise.all(
+      accounts.map(async (account) => {
+        try {
+          const usageStats = await redis.getAccountUsageStats(account.id, 'openai')
+          const groupInfos = await accountGroupService.getAccountGroups(account.id)
+
+          // 获取会话窗口使用统计（仅对有活跃窗口的账户）
+          let sessionWindowUsage = null
+          if (account.sessionWindow && account.sessionWindow.hasActiveWindow) {
+            const windowUsage = await redis.getAccountSessionWindowUsage(
+              account.id,
+              account.sessionWindow.windowStart,
+              account.sessionWindow.windowEnd
+            )
+
+            // 计算会话窗口的总费用
+            let totalCost = 0
+            const modelCosts = {}
+
+            for (const [modelName, usage] of Object.entries(windowUsage.modelUsage)) {
+              const usageData = {
+                input_tokens: usage.inputTokens,
+                output_tokens: usage.outputTokens,
+                cache_creation_input_tokens: usage.cacheCreateTokens,
+                cache_read_input_tokens: usage.cacheReadTokens
+              }
+
+              // 添加 cache_creation 子对象以支持精确 ephemeral 定价
+              if (usage.ephemeral5mTokens > 0 || usage.ephemeral1hTokens > 0) {
+                usageData.cache_creation = {
+                  ephemeral_5m_input_tokens: usage.ephemeral5mTokens,
+                  ephemeral_1h_input_tokens: usage.ephemeral1hTokens
+                }
+              }
+
+              logger.debug(`💰 Calculating cost for model ${modelName}:`, JSON.stringify(usageData))
+              const costResult = CostCalculator.calculateCost(usageData, modelName)
+              logger.debug(`💰 Cost result for ${modelName}: total=${costResult.costs.total}`)
+
+              modelCosts[modelName] = {
+                ...usage,
+                cost: costResult.costs.total
+              }
+              totalCost += costResult.costs.total
+            }
+
+            sessionWindowUsage = {
+              totalTokens: windowUsage.totalAllTokens,
+              totalRequests: windowUsage.totalRequests,
+              totalCost,
+              modelUsage: modelCosts
+            }
+          }
+
+          const formattedAccount = formatAccountExpiry(account)
+          return {
+            ...formattedAccount,
+            // 转换schedulable为布尔值
+            schedulable: account.schedulable === 'true' || account.schedulable === true,
+            groupInfos,
+            usage: {
+              daily: usageStats.daily,
+              total: usageStats.total,
+              averages: usageStats.averages,
+              sessionWindow: sessionWindowUsage
+            }
+          }
+        } catch (statsError) {
+          logger.warn(`⚠️ Failed to get usage stats for account ${account.id}:`, statsError.message)
+          // 如果获取统计失败，返回空统计
+          try {
+            const groupInfos = await accountGroupService.getAccountGroups(account.id)
+            const formattedAccount = formatAccountExpiry(account)
+            return {
+              ...formattedAccount,
+              groupInfos,
+              usage: {
+                daily: { tokens: 0, requests: 0, allTokens: 0 },
+                total: { tokens: 0, requests: 0, allTokens: 0 },
+                averages: { rpm: 0, tpm: 0 },
+                sessionWindow: null
+              }
+            }
+          } catch (groupError) {
+            logger.warn(
+              `⚠️ Failed to get group info for account ${account.id}:`,
+              groupError.message
+            )
+            const formattedAccount = formatAccountExpiry(account)
+            return {
+              ...formattedAccount,
+              groupInfos: [],
+              usage: {
+                daily: { tokens: 0, requests: 0, allTokens: 0 },
+                total: { tokens: 0, requests: 0, allTokens: 0 },
+                averages: { rpm: 0, tpm: 0 },
+                sessionWindow: null
+              }
+            }
+          }
+        }
+      })
+    )
 
     return res.json({ success: true, data: accountsWithStats })
   } catch (error) {

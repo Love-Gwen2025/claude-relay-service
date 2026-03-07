@@ -2,17 +2,12 @@ const express = require('express')
 const azureOpenaiAccountService = require('../../services/account/azureOpenaiAccountService')
 const accountGroupService = require('../../services/accountGroupService')
 const apiKeyService = require('../../services/apiKeyService')
+const redis = require('../../models/redis')
 const { authenticateAdmin } = require('../../middleware/auth')
 const logger = require('../../utils/logger')
 const webhookNotifier = require('../../utils/webhookNotifier')
 const axios = require('axios')
 const { formatAccountExpiry, mapExpiryField } = require('./utils')
-const {
-  buildAccountUsageMap,
-  buildAccountGroupInfoMap,
-  filterAccountsByGroupInfos,
-  getEmptyUsage
-} = require('./accountListUtils')
 
 const router = express.Router()
 
@@ -28,23 +23,70 @@ router.get('/azure-openai-accounts', authenticateAdmin, async (req, res) => {
       accounts = []
     }
 
-    const allGroupInfosMap = await buildAccountGroupInfoMap(accountGroupService, accounts, 'openai')
-    accounts = filterAccountsByGroupInfos(accounts, allGroupInfosMap, groupId)
-
-    const usageStatsMap = await buildAccountUsageMap(accounts)
-    const accountsWithStats = accounts.map((account) => {
-      const formattedAccount = formatAccountExpiry(account)
-      const usage = usageStatsMap.get(account.id) || getEmptyUsage()
-      return {
-        ...formattedAccount,
-        groupInfos: allGroupInfosMap.get(account.id) || [],
-        usage: {
-          daily: usage.daily,
-          total: usage.total,
-          averages: usage.averages
+    // 如果指定了分组筛选
+    if (groupId && groupId !== 'all') {
+      if (groupId === 'ungrouped') {
+        // 筛选未分组账户
+        const filteredAccounts = []
+        for (const account of accounts) {
+          const groups = await accountGroupService.getAccountGroups(account.id)
+          if (!groups || groups.length === 0) {
+            filteredAccounts.push(account)
+          }
         }
+        accounts = filteredAccounts
+      } else {
+        // 筛选特定分组的账户
+        const groupMembers = await accountGroupService.getGroupMembers(groupId)
+        accounts = accounts.filter((account) => groupMembers.includes(account.id))
       }
-    })
+    }
+
+    // 为每个账户添加使用统计信息和分组信息
+    const accountsWithStats = await Promise.all(
+      accounts.map(async (account) => {
+        try {
+          const usageStats = await redis.getAccountUsageStats(account.id, 'openai')
+          const groupInfos = await accountGroupService.getAccountGroups(account.id)
+          const formattedAccount = formatAccountExpiry(account)
+          return {
+            ...formattedAccount,
+            groupInfos,
+            usage: {
+              daily: usageStats.daily,
+              total: usageStats.total,
+              averages: usageStats.averages
+            }
+          }
+        } catch (error) {
+          logger.debug(`Failed to get usage stats for Azure OpenAI account ${account.id}:`, error)
+          try {
+            const groupInfos = await accountGroupService.getAccountGroups(account.id)
+            const formattedAccount = formatAccountExpiry(account)
+            return {
+              ...formattedAccount,
+              groupInfos,
+              usage: {
+                daily: { requests: 0, tokens: 0, allTokens: 0 },
+                total: { requests: 0, tokens: 0, allTokens: 0 },
+                averages: { rpm: 0, tpm: 0 }
+              }
+            }
+          } catch (groupError) {
+            logger.debug(`Failed to get group info for account ${account.id}:`, groupError)
+            return {
+              ...account,
+              groupInfos: [],
+              usage: {
+                daily: { requests: 0, tokens: 0, allTokens: 0 },
+                total: { requests: 0, tokens: 0, allTokens: 0 },
+                averages: { rpm: 0, tpm: 0 }
+              }
+            }
+          }
+        }
+      })
+    )
 
     res.json({
       success: true,
