@@ -8,6 +8,19 @@ const os = require('os')
 
 // 安全的 JSON 序列化函数，处理循环引用和特殊字符
 const safeStringify = (obj, maxDepth = Infinity) => {
+  // Axios error 预清理: 剥掉巨型字段(request/response body/config data)，避免序列化 OOM
+  if (obj && typeof obj === 'object' && obj.config && obj.request) {
+    obj = {
+      message: obj.message,
+      code: obj.code,
+      status: obj.response?.status,
+      statusText: obj.response?.statusText,
+      url: obj.config?.url,
+      method: obj.config?.method,
+      stack: obj.stack
+    }
+  }
+
   const seen = new WeakSet()
 
   const replacer = (key, value, depth = 0) => {
