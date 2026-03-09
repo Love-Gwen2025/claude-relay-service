@@ -4931,7 +4931,7 @@ redisClient.batchGetChunked = async function (keys, chunkSize = 500) {
  * @param {string} options.fetchType - 获取类型：'hgetall' | 'get' | 'none'，默认 'hgetall'
  */
 redisClient.scanAndProcess = async function (pattern, processor, options = {}) {
-  const { scanBatchSize = 5000, processBatchSize = 500, fetchType = 'hgetall' } = options
+  const { scanBatchSize = 50000, processBatchSize = 500, fetchType = 'hgetall' } = options
   const client = this.getClientSafe()
 
   let cursor = '0'
