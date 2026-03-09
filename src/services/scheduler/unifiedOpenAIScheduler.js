@@ -65,7 +65,7 @@ class UnifiedOpenAIScheduler {
         return { canUse: false, reason: 'not_schedulable' }
       }
 
-      stillLimited = await this.isAccountRateLimited(accountId)
+      stillLimited = await this.isAccountRateLimited(accountId, account)
       rateLimitChecked = true
       if (stillLimited) {
         return { canUse: false, reason: 'rate_limited' }
@@ -82,7 +82,7 @@ class UnifiedOpenAIScheduler {
 
     if (hasRateLimitFlag) {
       if (!rateLimitChecked) {
-        stillLimited = await this.isAccountRateLimited(accountId)
+        stillLimited = await this.isAccountRateLimited(accountId, account)
         rateLimitChecked = true
       }
       if (stillLimited) {
@@ -110,7 +110,7 @@ class UnifiedOpenAIScheduler {
     }
 
     if (!rateLimitChecked) {
-      stillLimited = await this.isAccountRateLimited(accountId)
+      stillLimited = await this.isAccountRateLimited(accountId, account)
       if (stillLimited) {
         return { canUse: false, reason: 'rate_limited' }
       }
@@ -370,6 +370,9 @@ class UnifiedOpenAIScheduler {
   async _getAllAvailableAccounts(apiKeyData, requestedModel = null) {
     const availableAccounts = []
 
+    // 批量获取所有临时不可用状态（避免循环内逐个查询 Redis）
+    const tempUnavailableMap = await upstreamErrorHelper.getAllTempUnavailable()
+
     // 注意：专属账户的处理已经在 selectAccountForApiKey 中完成
     // 这里只处理共享池账户
 
@@ -396,8 +399,7 @@ class UnifiedOpenAIScheduler {
           continue
         }
 
-        const isTempUnavailable = await upstreamErrorHelper.isTempUnavailable(accountId, 'openai')
-        if (isTempUnavailable) {
+        if (tempUnavailableMap[`openai:${accountId}`]) {
           logger.debug(`⏭️ Skipping openai account ${account.name} - temporarily unavailable`)
           continue
         }
@@ -497,11 +499,7 @@ class UnifiedOpenAIScheduler {
           }
         }
 
-        const isTempUnavailable = await upstreamErrorHelper.isTempUnavailable(
-          account.id,
-          'openai-responses'
-        )
-        if (isTempUnavailable) {
+        if (tempUnavailableMap[`openai-responses:${account.id}`]) {
           logger.debug(
             `⏭️ Skipping openai-responses account ${account.name} - temporarily unavailable`
           )
@@ -934,9 +932,9 @@ class UnifiedOpenAIScheduler {
   }
 
   // 🔍 检查账户是否处于限流状态
-  async isAccountRateLimited(accountId) {
+  async isAccountRateLimited(accountId, existingAccount = null) {
     try {
-      const account = await openaiAccountService.getAccount(accountId)
+      const account = existingAccount || (await openaiAccountService.getAccount(accountId))
       if (!account) {
         return false
       }

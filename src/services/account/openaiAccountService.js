@@ -721,8 +721,8 @@ async function getAllAccounts() {
       // 时间戳改由 codexUsage.updatedAt 暴露
       delete accountData.codexUsageUpdatedAt
 
-      // 获取限流状态信息
-      const rateLimitInfo = await getAccountRateLimitInfo(accountData.id)
+      // 从已有数据计算限流状态（避免 N+1 查询）
+      const rateLimitInfo = _computeRateLimitInfo(accountData)
 
       // 解析代理配置
       if (accountData.proxy) {
@@ -1128,16 +1128,11 @@ async function toggleSchedulable(accountId) {
   }
 }
 
-// 获取账户限流信息
-async function getAccountRateLimitInfo(accountId) {
-  const account = await getAccount(accountId)
-  if (!account) {
-    return null
-  }
-
-  const status = account.rateLimitStatus || 'normal'
-  const rateLimitedAt = account.rateLimitedAt || null
-  const rateLimitResetAt = account.rateLimitResetAt || null
+// 从已有的账户数据计算限流信息（纯函数，不查 Redis）
+function _computeRateLimitInfo(accountData) {
+  const status = accountData.rateLimitStatus || 'normal'
+  const rateLimitedAt = accountData.rateLimitedAt || null
+  const rateLimitResetAt = accountData.rateLimitResetAt || null
 
   if (status === 'limited') {
     const now = Date.now()
@@ -1170,6 +1165,15 @@ async function getAccountRateLimitInfo(accountId) {
     rateLimitResetAt,
     minutesRemaining: 0
   }
+}
+
+// 获取账户限流信息（兼容旧调用，内部委托给 _computeRateLimitInfo）
+async function getAccountRateLimitInfo(accountId) {
+  const account = await getAccount(accountId)
+  if (!account) {
+    return null
+  }
+  return _computeRateLimitInfo(account)
 }
 
 // 更新账户使用统计（tokens参数可选，默认为0，仅更新最后使用时间）
@@ -1250,5 +1254,6 @@ module.exports = {
   updateCodexUsageSnapshot,
   encrypt,
   decrypt,
-  encryptor // 暴露加密器以便测试和监控
+  encryptor, // 暴露加密器以便测试和监控
+  _computeRateLimitInfo // 暴露纯函数以便测试
 }
