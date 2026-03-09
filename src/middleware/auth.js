@@ -1072,35 +1072,39 @@ const authenticateApiKey = async (req, res, next) => {
 
       const now = Date.now()
       const windowDuration = rateLimitWindow * 60 * 1000 // 转换为毫秒
+      const client = redis.getClient()
 
-      // 获取窗口开始时间
-      let windowStart = await redis.getClient().get(windowStartKey)
+      // 一次 MGET 获取窗口起始时间和所有计数
+      const [rawWindowStart, rawRequests, rawTokens, rawCost] = await client.mget(
+        windowStartKey,
+        requestCountKey,
+        tokenCountKey,
+        costCountKey
+      )
 
-      if (!windowStart) {
-        // 第一次请求，设置窗口开始时间
-        await redis.getClient().set(windowStartKey, now, 'PX', windowDuration)
-        await redis.getClient().set(requestCountKey, 0, 'PX', windowDuration)
-        await redis.getClient().set(tokenCountKey, 0, 'PX', windowDuration)
-        await redis.getClient().set(costCountKey, 0, 'PX', windowDuration) // 新增：重置费用
+      let windowStart
+      let currentRequests
+      let currentTokens
+      let currentCost
+
+      if (!rawWindowStart || now - parseInt(rawWindowStart) >= windowDuration) {
+        // 首次请求或窗口已过期，用 pipeline 批量重置
+        const pipe = client.pipeline()
+        pipe.set(windowStartKey, now, 'PX', windowDuration)
+        pipe.set(requestCountKey, 0, 'PX', windowDuration)
+        pipe.set(tokenCountKey, 0, 'PX', windowDuration)
+        pipe.set(costCountKey, 0, 'PX', windowDuration)
+        await pipe.exec()
         windowStart = now
+        currentRequests = 0
+        currentTokens = 0
+        currentCost = 0
       } else {
-        windowStart = parseInt(windowStart)
-
-        // 检查窗口是否已过期
-        if (now - windowStart >= windowDuration) {
-          // 窗口已过期，重置
-          await redis.getClient().set(windowStartKey, now, 'PX', windowDuration)
-          await redis.getClient().set(requestCountKey, 0, 'PX', windowDuration)
-          await redis.getClient().set(tokenCountKey, 0, 'PX', windowDuration)
-          await redis.getClient().set(costCountKey, 0, 'PX', windowDuration) // 新增：重置费用
-          windowStart = now
-        }
+        windowStart = parseInt(rawWindowStart)
+        currentRequests = parseInt(rawRequests || '0')
+        currentTokens = parseInt(rawTokens || '0')
+        currentCost = parseFloat(rawCost || '0')
       }
-
-      // 获取当前计数
-      const currentRequests = parseInt((await redis.getClient().get(requestCountKey)) || '0')
-      const currentTokens = parseInt((await redis.getClient().get(tokenCountKey)) || '0')
-      const currentCost = parseFloat((await redis.getClient().get(costCountKey)) || '0') // 新增：当前费用
 
       // 检查请求次数限制
       if (rateLimitRequests > 0 && currentRequests >= rateLimitRequests) {
@@ -1166,7 +1170,7 @@ const authenticateApiKey = async (req, res, next) => {
       }
 
       // 增加请求计数
-      await redis.getClient().incr(requestCountKey)
+      await client.incr(requestCountKey)
 
       // 存储限流信息到请求对象
       req.rateLimitInfo = {
