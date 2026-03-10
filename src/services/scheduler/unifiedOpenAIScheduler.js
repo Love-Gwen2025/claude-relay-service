@@ -625,8 +625,17 @@ class UnifiedOpenAIScheduler {
       if (!usage) {
         return -1
       }
-      const primary = usage.primary?.usedPercent
-      const secondary = usage.secondary?.usedPercent
+      const now = Date.now()
+
+      // 如果 resetAt 已过期，说明该窗口额度已重置，视为 0%
+      const primaryResetAt = usage.primary?.resetAt ? new Date(usage.primary.resetAt).getTime() : 0
+      const primaryExpired = primaryResetAt > 0 && primaryResetAt < now
+      const primary = primaryExpired ? 0 : usage.primary?.usedPercent
+
+      const secondaryResetAt = usage.secondary?.resetAt ? new Date(usage.secondary.resetAt).getTime() : 0
+      const secondaryExpired = secondaryResetAt > 0 && secondaryResetAt < now
+      const secondary = secondaryExpired ? 0 : usage.secondary?.usedPercent
+
       const hasPrimary = Number.isFinite(primary)
       const hasSecondary = Number.isFinite(secondary) && secondary > 0
       if (!hasPrimary && !hasSecondary) {
@@ -695,12 +704,25 @@ class UnifiedOpenAIScheduler {
           `openai:account:${accountId}`,
           'codexPrimaryUsedPercent',
           'codexSecondaryUsedPercent',
+          'codexPrimaryResetAfterSeconds',
+          'codexSecondaryResetAfterSeconds',
+          'codexUsageUpdatedAt',
           'name'
         )
-        const [rawPrimary, rawSecondary, accountName] = fields
+        const [rawPrimary, rawSecondary, rawPrimaryResetSec, rawSecondaryResetSec, rawUpdatedAt, accountName] = fields
 
-        const primary = parseFloat(rawPrimary)
-        const secondary = parseFloat(rawSecondary)
+        const now = Date.now()
+        const updatedAt = rawUpdatedAt ? new Date(rawUpdatedAt).getTime() : 0
+
+        // 如果 updatedAt + resetAfterSeconds 已过期，说明该窗口额度已重置，视为 0
+        const primaryResetAt = updatedAt && rawPrimaryResetSec ? updatedAt + parseFloat(rawPrimaryResetSec) * 1000 : 0
+        const primaryExpired = primaryResetAt > 0 && primaryResetAt < now
+        const primary = primaryExpired ? 0 : parseFloat(rawPrimary)
+
+        const secondaryResetAt = updatedAt && rawSecondaryResetSec ? updatedAt + parseFloat(rawSecondaryResetSec) * 1000 : 0
+        const secondaryExpired = secondaryResetAt > 0 && secondaryResetAt < now
+        const secondary = secondaryExpired ? 0 : parseFloat(rawSecondary)
+
         const hasPrimary = Number.isFinite(primary)
         const hasSecondary = Number.isFinite(secondary) && secondary > 0
 
