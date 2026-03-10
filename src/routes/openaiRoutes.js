@@ -262,14 +262,16 @@ const handleResponses = async (req, res) => {
     if (!sessionHash) {
       let fallbackContent = null
 
-      // 使用 API Key ID 作为基础，保证不同 key 不会绑到同一个账号
-      // 再叠加 instructions 区分同一 key 的不同会话上下文
+      // 使用 API Key ID + 客户端 IP 作为基础
+      // 同一 key 分发给多个用户时，IP 不同，session 自然隔离
+      // 再叠加 instructions 区分同一用户的不同会话上下文
       const keyId = apiKeyData.id || apiKeyData.name || 'default'
+      const clientIp = req.headers['x-real-ip'] || req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || ''
 
       if (req.body?.instructions && typeof req.body.instructions === 'string') {
-        fallbackContent = `${keyId}:${req.body.instructions}`
+        fallbackContent = `${keyId}:${clientIp}:${req.body.instructions}`
       } else {
-        fallbackContent = keyId
+        fallbackContent = `${keyId}:${clientIp}`
       }
 
       sessionHash = crypto.createHash('sha256').update(fallbackContent).digest('hex')
@@ -310,7 +312,6 @@ const handleResponses = async (req, res) => {
         'truncation',
         'text',
         'service_tier',
-        'prompt_cache_retention',
         'safety_identifier'
       ]
       fieldsToRemove.forEach((field) => {
@@ -347,6 +348,12 @@ const handleResponses = async (req, res) => {
       if (incoming[key] !== undefined) {
         headers[key] = incoming[key]
       }
+    }
+
+    // 若客户端未传 session_id，使用 CRM 生成的 sessionHash 作为上游 session_id
+    // 这样 OpenAI 侧能建立和复用 prompt cache，大幅降低 token 消耗
+    if (!headers['session_id'] && sessionHash) {
+      headers['session_id'] = sessionHash
     }
 
     // 判断是否访问 compact 端点
