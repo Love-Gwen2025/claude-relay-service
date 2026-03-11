@@ -15,6 +15,8 @@ const modelsConfig = require('../../config/models')
 const { getSafeMessage } = require('../utils/errorSanitizer')
 
 const router = express.Router()
+const CODEX_TEST_INSTRUCTIONS =
+  "You are Codex, based on GPT-5. You are running as a coding agent in the Codex CLI on a user's computer."
 
 // 📋 获取可用模型列表（公开接口）
 router.get('/models', (req, res) => {
@@ -1164,11 +1166,9 @@ router.post('/api-key/test-gemini', async (req, res) => {
 // 🧪 OpenAI/Codex API Key 端点测试接口
 router.post('/api-key/test-openai', async (req, res) => {
   const config = require('../../config/config')
-  const { createOpenAITestPayload } = require('../utils/testPayloadHelper')
 
   try {
     const { apiKey, model = 'gpt-5', prompt = 'hi' } = req.body
-    const maxTokens = sanitizeMaxTokens(req.body.maxTokens)
 
     if (!apiKey) {
       return res.status(400).json({
@@ -1218,7 +1218,27 @@ router.post('/api-key/test-openai', async (req, res) => {
     res.write(`data: ${JSON.stringify({ type: 'test_start', message: 'Test started' })}\n\n`)
 
     const axios = require('axios')
-    const payload = createOpenAITestPayload(model, { prompt, maxTokens })
+    const payload = {
+      model,
+      stream: true,
+      instructions: CODEX_TEST_INSTRUCTIONS,
+      input: [
+        {
+          type: 'message',
+          role: 'user',
+          content: [
+            {
+              type: 'input_text',
+              text: prompt
+            }
+          ]
+        }
+      ],
+      reasoning: {
+        effort: 'medium',
+        summary: 'auto'
+      }
+    }
 
     try {
       const response = await axios.post(apiUrl, payload, {
