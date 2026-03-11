@@ -16,7 +16,6 @@ const AccountsView = () => import('@/views/AccountsView.vue')
 const AccountUsageRecordsView = () => import('@/views/AccountUsageRecordsView.vue')
 const SettingsView = () => import('@/views/SettingsView.vue')
 const ApiStatsView = () => import('@/views/ApiStatsView.vue')
-const QuotaCardsView = () => import('@/views/QuotaCardsView.vue')
 
 const routes = [
   {
@@ -144,18 +143,6 @@ const routes = [
         path: '',
         name: 'UserManagement',
         component: UserManagementView
-      }
-    ]
-  },
-  {
-    path: '/quota-cards',
-    component: MainLayout,
-    meta: { requiresAuth: true },
-    children: [
-      {
-        path: '',
-        name: 'QuotaCards',
-        component: QuotaCardsView
       }
     ]
   },
