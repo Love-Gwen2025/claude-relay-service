@@ -11,6 +11,11 @@ const claudeRelayConfigService = require('../services/claudeRelayConfigService')
 const { calculateWaitTimeStats } = require('../utils/statsHelper')
 const { isClaudeFamilyModel } = require('../utils/modelHelper')
 
+function isGoHttpClientRequest(req) {
+  const userAgent = req.headers['user-agent'] || ''
+  return /^Go-http-client\/[\d.]+$/i.test(userAgent)
+}
+
 // 工具函数
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -512,6 +517,41 @@ const authenticateApiKey = async (req, res, next) => {
       logger.api(
         `✅ Client validated: ${validationResult.clientName} (${validationResult.matchedClient}) for key: ${validation.keyData.id} (${validation.keyData.name})`
       )
+    }
+
+    if (!skipKeyRestrictions) {
+      try {
+        const globalClientWhitelistEnabled =
+          await claudeRelayConfigService.isGlobalClientWhitelistEnabled()
+        const globalAllowedClients = await claudeRelayConfigService.getGlobalAllowedClients()
+
+        if (globalClientWhitelistEnabled && globalAllowedClients.length > 0) {
+          const validationResult = ClientValidator.validateRequest(globalAllowedClients, req)
+
+          if (!validationResult.allowed) {
+            if (isGoHttpClientRequest(req)) {
+              logger.api('✅ Global client whitelist bypassed for Go-http-client request')
+            } else {
+              const clientIP = req.ip || req.connection?.remoteAddress || 'unknown'
+              logger.security(
+                `🚫 Global client whitelist blocked request from ${clientIP} - UA: "${validationResult.userAgent}" path: "${validationResult.requestPath}"`
+              )
+              return res.status(403).json({
+                error: 'Client not allowed',
+                message: 'This service only accepts approved clients',
+                allowedClients: globalAllowedClients,
+                userAgent: validationResult.userAgent
+              })
+            }
+          } else {
+            logger.api(
+              `✅ Global client whitelist matched: ${validationResult.clientName} (${validationResult.matchedClient})`
+            )
+          }
+        }
+      } catch (error) {
+        logger.error('❌ Error checking global client whitelist:', error)
+      }
     }
 
     // 🔒 检查全局 Claude Code 限制（与 API Key 级别是 OR 逻辑）

@@ -50,10 +50,44 @@ const CLIENT_DEFINITIONS = {
     id: 'codex_cli',
     name: 'Codex CLI',
     displayName: 'Codex Command Line Tool',
-    description: 'Cursor/Codex command-line interface',
+    description: 'Official Codex command-line and editor-integrated clients',
     icon: '🔷',
     // Codex CLI 仅允许访问 OpenAI Responses 和 Azure 端点
-    allowedPathPrefixes: ['/openai/responses', '/openai/v1/responses', '/azure/']
+    allowedPathPrefixes: [
+      '/openai/responses',
+      '/openai/v1/responses',
+      '/openai/responses/compact',
+      '/openai/v1/responses/compact',
+      '/azure/'
+    ]
+  },
+
+  CODEX_APP: {
+    id: 'codex_app',
+    name: 'Codex App',
+    displayName: 'Codex Desktop',
+    description: 'Official Codex desktop application',
+    icon: '🖥️',
+    allowedPathPrefixes: [
+      '/openai/responses',
+      '/openai/v1/responses',
+      '/openai/responses/compact',
+      '/openai/v1/responses/compact'
+    ]
+  },
+
+  OPENCODE: {
+    id: 'opencode',
+    name: 'OpenCode',
+    displayName: 'OpenCode',
+    description: 'OpenCode client built on AI SDK',
+    icon: '🧩',
+    allowedPathPrefixes: [
+      '/openai/responses',
+      '/openai/v1/responses',
+      '/openai/v1/chat/completions',
+      '/v1/chat/completions'
+    ]
   },
 
   DROID_CLI: {
@@ -72,6 +106,8 @@ const CLIENT_IDS = {
   CLAUDE_CODE: 'claude_code',
   GEMINI_CLI: 'gemini_cli',
   CODEX_CLI: 'codex_cli',
+  CODEX_APP: 'codex_app',
+  OPENCODE: 'opencode',
   DROID_CLI: 'droid_cli'
 }
 

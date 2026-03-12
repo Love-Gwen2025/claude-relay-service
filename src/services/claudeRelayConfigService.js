@@ -12,6 +12,8 @@ const SESSION_BINDING_PREFIX = 'original_session_binding:'
 // 默认配置
 const DEFAULT_CONFIG = {
   claudeCodeOnlyEnabled: false,
+  globalClientWhitelistEnabled: false,
+  globalAllowedClients: [],
   globalSessionBindingEnabled: false,
   sessionBindingErrorMessage: '你的本地session已污染，请清理后使用。',
   sessionBindingTtlDays: 1, // 会话绑定 TTL（天），默认1天（支持 /clear 场景，避免 Redis 累积）
@@ -114,6 +116,8 @@ class ClaudeRelayConfigService {
 
       logger.info(`✅ Claude relay config updated by ${updatedBy}:`, {
         claudeCodeOnlyEnabled: updatedConfig.claudeCodeOnlyEnabled,
+        globalClientWhitelistEnabled: updatedConfig.globalClientWhitelistEnabled,
+        globalAllowedClients: updatedConfig.globalAllowedClients,
         globalSessionBindingEnabled: updatedConfig.globalSessionBindingEnabled,
         concurrentRequestQueueEnabled: updatedConfig.concurrentRequestQueueEnabled
       })
@@ -132,6 +136,16 @@ class ClaudeRelayConfigService {
   async isClaudeCodeOnlyEnabled() {
     const cfg = await this.getConfig()
     return cfg.claudeCodeOnlyEnabled === true
+  }
+
+  async isGlobalClientWhitelistEnabled() {
+    const cfg = await this.getConfig()
+    return cfg.globalClientWhitelistEnabled === true
+  }
+
+  async getGlobalAllowedClients() {
+    const cfg = await this.getConfig()
+    return Array.isArray(cfg.globalAllowedClients) ? cfg.globalAllowedClients : []
   }
 
   /**

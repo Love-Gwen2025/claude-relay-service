@@ -6,6 +6,7 @@
 const express = require('express')
 const { authenticateAdmin } = require('../../middleware/auth')
 const claudeRelayConfigService = require('../../services/claudeRelayConfigService')
+const { isValidClientId } = require('../../validators/clientDefinitions')
 const logger = require('../../utils/logger')
 
 const router = express.Router()
@@ -38,6 +39,8 @@ router.put('/claude-relay-config', authenticateAdmin, async (req, res) => {
   try {
     const {
       claudeCodeOnlyEnabled,
+      globalClientWhitelistEnabled,
+      globalAllowedClients,
       globalSessionBindingEnabled,
       sessionBindingErrorMessage,
       sessionBindingTtlDays,
@@ -53,6 +56,26 @@ router.put('/claude-relay-config', authenticateAdmin, async (req, res) => {
     // 验证输入
     if (claudeCodeOnlyEnabled !== undefined && typeof claudeCodeOnlyEnabled !== 'boolean') {
       return res.status(400).json({ error: 'claudeCodeOnlyEnabled must be a boolean' })
+    }
+
+    if (
+      globalClientWhitelistEnabled !== undefined &&
+      typeof globalClientWhitelistEnabled !== 'boolean'
+    ) {
+      return res.status(400).json({ error: 'globalClientWhitelistEnabled must be a boolean' })
+    }
+
+    if (globalAllowedClients !== undefined) {
+      if (!Array.isArray(globalAllowedClients)) {
+        return res.status(400).json({ error: 'globalAllowedClients must be an array' })
+      }
+
+      const invalidClients = globalAllowedClients.filter((clientId) => !isValidClientId(clientId))
+      if (invalidClients.length > 0) {
+        return res.status(400).json({
+          error: `globalAllowedClients contains invalid client IDs: ${invalidClients.join(', ')}`
+        })
+      }
     }
 
     if (
@@ -165,6 +188,12 @@ router.put('/claude-relay-config', authenticateAdmin, async (req, res) => {
     const updateData = {}
     if (claudeCodeOnlyEnabled !== undefined) {
       updateData.claudeCodeOnlyEnabled = claudeCodeOnlyEnabled
+    }
+    if (globalClientWhitelistEnabled !== undefined) {
+      updateData.globalClientWhitelistEnabled = globalClientWhitelistEnabled
+    }
+    if (globalAllowedClients !== undefined) {
+      updateData.globalAllowedClients = globalAllowedClients
     }
     if (globalSessionBindingEnabled !== undefined) {
       updateData.globalSessionBindingEnabled = globalSessionBindingEnabled
