@@ -41,6 +41,8 @@ router.put('/claude-relay-config', authenticateAdmin, async (req, res) => {
       claudeCodeOnlyEnabled,
       globalClientWhitelistEnabled,
       globalAllowedClients,
+      officialOpenAIGroupId,
+      thirdPartyOpenAIGroupId,
       globalSessionBindingEnabled,
       sessionBindingErrorMessage,
       sessionBindingTtlDays,
@@ -76,6 +78,22 @@ router.put('/claude-relay-config', authenticateAdmin, async (req, res) => {
           error: `globalAllowedClients contains invalid client IDs: ${invalidClients.join(', ')}`
         })
       }
+    }
+
+    if (
+      officialOpenAIGroupId !== undefined &&
+      officialOpenAIGroupId !== null &&
+      typeof officialOpenAIGroupId !== 'string'
+    ) {
+      return res.status(400).json({ error: 'officialOpenAIGroupId must be a string' })
+    }
+
+    if (
+      thirdPartyOpenAIGroupId !== undefined &&
+      thirdPartyOpenAIGroupId !== null &&
+      typeof thirdPartyOpenAIGroupId !== 'string'
+    ) {
+      return res.status(400).json({ error: 'thirdPartyOpenAIGroupId must be a string' })
     }
 
     if (
@@ -194,6 +212,12 @@ router.put('/claude-relay-config', authenticateAdmin, async (req, res) => {
     }
     if (globalAllowedClients !== undefined) {
       updateData.globalAllowedClients = globalAllowedClients
+    }
+    if (officialOpenAIGroupId !== undefined) {
+      updateData.officialOpenAIGroupId = (officialOpenAIGroupId || '').trim()
+    }
+    if (thirdPartyOpenAIGroupId !== undefined) {
+      updateData.thirdPartyOpenAIGroupId = (thirdPartyOpenAIGroupId || '').trim()
     }
     if (globalSessionBindingEnabled !== undefined) {
       updateData.globalSessionBindingEnabled = globalSessionBindingEnabled

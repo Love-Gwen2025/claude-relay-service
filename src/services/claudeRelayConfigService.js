@@ -14,6 +14,8 @@ const DEFAULT_CONFIG = {
   claudeCodeOnlyEnabled: false,
   globalClientWhitelistEnabled: false,
   globalAllowedClients: [],
+  officialOpenAIGroupId: '',
+  thirdPartyOpenAIGroupId: '',
   globalSessionBindingEnabled: false,
   sessionBindingErrorMessage: '你的本地session已污染，请清理后使用。',
   sessionBindingTtlDays: 1, // 会话绑定 TTL（天），默认1天（支持 /clear 场景，避免 Redis 累积）
@@ -118,6 +120,8 @@ class ClaudeRelayConfigService {
         claudeCodeOnlyEnabled: updatedConfig.claudeCodeOnlyEnabled,
         globalClientWhitelistEnabled: updatedConfig.globalClientWhitelistEnabled,
         globalAllowedClients: updatedConfig.globalAllowedClients,
+        officialOpenAIGroupId: updatedConfig.officialOpenAIGroupId,
+        thirdPartyOpenAIGroupId: updatedConfig.thirdPartyOpenAIGroupId,
         globalSessionBindingEnabled: updatedConfig.globalSessionBindingEnabled,
         concurrentRequestQueueEnabled: updatedConfig.concurrentRequestQueueEnabled
       })
@@ -146,6 +150,16 @@ class ClaudeRelayConfigService {
   async getGlobalAllowedClients() {
     const cfg = await this.getConfig()
     return Array.isArray(cfg.globalAllowedClients) ? cfg.globalAllowedClients : []
+  }
+
+  async getOfficialOpenAIGroupId() {
+    const cfg = await this.getConfig()
+    return typeof cfg.officialOpenAIGroupId === 'string' ? cfg.officialOpenAIGroupId : ''
+  }
+
+  async getThirdPartyOpenAIGroupId() {
+    const cfg = await this.getConfig()
+    return typeof cfg.thirdPartyOpenAIGroupId === 'string' ? cfg.thirdPartyOpenAIGroupId : ''
   }
 
   /**

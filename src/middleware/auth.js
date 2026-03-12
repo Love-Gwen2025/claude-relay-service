@@ -16,6 +16,60 @@ function isGoHttpClientRequest(req) {
   return /^Go-http-client\/[\d.]+$/i.test(userAgent)
 }
 
+function normalizeTagList(tags) {
+  if (!tags) {
+    return []
+  }
+  if (Array.isArray(tags)) {
+    return tags.filter((tag) => typeof tag === 'string' && tag.trim())
+  }
+  if (typeof tags === 'string') {
+    try {
+      const parsed = JSON.parse(tags)
+      if (Array.isArray(parsed)) {
+        return parsed.filter((tag) => typeof tag === 'string' && tag.trim())
+      }
+    } catch (_) {
+      return []
+    }
+  }
+  return []
+}
+
+function resolveAccessChannel(req) {
+  const rawChannel =
+    req.headers['x-access-channel'] ||
+    req.headers['x-client-channel'] ||
+    req.headers['x-route-channel'] ||
+    ''
+  const normalized = String(rawChannel || '')
+    .trim()
+    .toLowerCase()
+  if (normalized === 'official' || normalized === 'third_party') {
+    return normalized
+  }
+  return 'official'
+}
+
+function isOfficialClientRequest(req) {
+  const userAgent = req.headers['user-agent'] || ''
+  if (/^claude-cli\/[\d.]+/i.test(userAgent)) {
+    return true
+  }
+  return ClientValidator.validateRequest(['codex_cli', 'codex_app', 'opencode', 'claude_code'], req)
+    .allowed
+}
+
+function keyAllowsChannel(tags, accessChannel) {
+  const normalizedTags = normalizeTagList(tags)
+  const sourceTags = normalizedTags.filter((tag) => tag.startsWith('source:'))
+  if (sourceTags.length === 0) {
+    return accessChannel === 'official'
+  }
+  const requiredTag = `source:${accessChannel}`
+  return normalizedTags.includes(requiredTag)
+}
+
 // 工具函数
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -487,6 +541,7 @@ const authenticateApiKey = async (req, res, next) => {
     }
 
     const skipKeyRestrictions = isTokenCountRequest(req)
+    const accessChannel = resolveAccessChannel(req)
 
     // 🔒 检查客户端限制（使用新的验证器）
     if (
@@ -519,7 +574,7 @@ const authenticateApiKey = async (req, res, next) => {
       )
     }
 
-    if (!skipKeyRestrictions) {
+    if (!skipKeyRestrictions && accessChannel === 'official') {
       try {
         const globalClientWhitelistEnabled =
           await claudeRelayConfigService.isGlobalClientWhitelistEnabled()
@@ -551,6 +606,37 @@ const authenticateApiKey = async (req, res, next) => {
         }
       } catch (error) {
         logger.error('❌ Error checking global client whitelist:', error)
+      }
+    }
+
+    const keyTags = normalizeTagList(validation.keyData.tags)
+
+    if (!skipKeyRestrictions) {
+      if (!keyAllowsChannel(keyTags, accessChannel)) {
+        logger.security(
+          `🚫 Access channel denied for key: ${validation.keyData.id} (${validation.keyData.name}), channel: ${accessChannel}`
+        )
+        return res.status(403).json({
+          error: 'Access channel not allowed',
+          message: `This API key is not allowed to access the ${accessChannel} channel`,
+          accessChannel
+        })
+      }
+
+      if (
+        accessChannel === 'official' &&
+        !isOfficialClientRequest(req) &&
+        !isGoHttpClientRequest(req)
+      ) {
+        const clientIP = req.ip || req.connection?.remoteAddress || 'unknown'
+        logger.security(
+          `🚫 Official channel requires approved client for key: ${validation.keyData.id} (${validation.keyData.name}) from ${clientIP}`
+        )
+        return res.status(403).json({
+          error: 'Client not allowed',
+          message: 'The official channel only accepts approved official clients',
+          accessChannel
+        })
       }
     }
 
@@ -1357,11 +1443,32 @@ const authenticateApiKey = async (req, res, next) => {
       restrictedModels: validation.keyData.restrictedModels,
       enableClientRestriction: validation.keyData.enableClientRestriction,
       allowedClients: validation.keyData.allowedClients,
+      tags: keyTags,
+      accessChannel,
       allow1mContext: validation.keyData.allow1mContext,
       dailyCostLimit: validation.keyData.dailyCostLimit,
       dailyCost: validation.keyData.dailyCost,
       totalCostLimit: validation.keyData.totalCostLimit,
       totalCost: validation.keyData.totalCost
+    }
+
+    if (!skipKeyRestrictions) {
+      try {
+        if (accessChannel === 'official') {
+          const officialOpenAIGroupId = await claudeRelayConfigService.getOfficialOpenAIGroupId()
+          if (officialOpenAIGroupId) {
+            req.apiKey.openaiAccountId = `group:${officialOpenAIGroupId}`
+          }
+        } else if (accessChannel === 'third_party') {
+          const thirdPartyOpenAIGroupId =
+            await claudeRelayConfigService.getThirdPartyOpenAIGroupId()
+          if (thirdPartyOpenAIGroupId) {
+            req.apiKey.openaiAccountId = `group:${thirdPartyOpenAIGroupId}`
+          }
+        }
+      } catch (error) {
+        logger.error('❌ Failed to resolve channel-based OpenAI group routing:', error)
+      }
     }
 
     const authDuration = Date.now() - startTime
@@ -2128,5 +2235,10 @@ module.exports = {
   securityMiddleware,
   errorHandler,
   globalRateLimit,
-  requestSizeLimit
+  requestSizeLimit,
+  isGoHttpClientRequest,
+  normalizeTagList,
+  resolveAccessChannel,
+  isOfficialClientRequest,
+  keyAllowsChannel
 }
