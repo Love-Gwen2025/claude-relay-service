@@ -37,13 +37,17 @@ class CodexCliValidator {
       const userAgent = req.headers['user-agent'] || ''
       const originator = req.headers['originator'] || ''
       const sessionId = req.headers['session_id']
+      const requestPath = req.path || ''
 
       // 1. 基础 User-Agent 检查
       // Codex CLI 的 UA 格式:
       // - codex_vscode/0.35.0 (Windows 10.0.26100; x86_64) unknown (Cursor; 0.4.10)
       // - codex_cli_rs/0.38.0 (Ubuntu 22.4.0; x86_64) WindowsTerminal
       // - codex_exec/0.89.0 (Mac OS 26.2.0; arm64) xterm-256color (非交互式/脚本模式)
-      const codexCliPattern = /^(codex_vscode|codex_cli_rs|codex_exec)\/[\d.]+/i
+      // - codex_sdk_ts/0.114.0 (...) (codex-exec; 0.114.0)
+      // - hapi-codex-client/0.114.0 (...) (hapi-codex-client; 1.0.0)
+      const codexCliPattern =
+        /^(codex_vscode|codex_cli_rs|codex_exec|codex_sdk_ts|hapi-codex-client)\/[\w.-]+/i
       const uaMatch = userAgent.match(codexCliPattern)
 
       if (!uaMatch) {
@@ -55,17 +59,32 @@ class CodexCliValidator {
       // 对于 /openai 和 /azure 路径需要完整验证
       const strictValidationPaths = ['/openai', '/azure']
       const needsStrictValidation =
-        req.path && strictValidationPaths.some((path) => req.path.startsWith(path))
+        requestPath && strictValidationPaths.some((path) => requestPath.startsWith(path))
 
       if (!needsStrictValidation) {
         // 其他路径，只要 User-Agent 匹配就认为是 Codex CLI
-        logger.debug(`Codex CLI detected for path: ${req.path}, allowing access`)
+        logger.debug(`Codex CLI detected for path: ${requestPath}, allowing access`)
         return true
       }
 
       // 3. 验证 originator 头必须与 UA 中的客户端类型匹配
       const clientType = uaMatch[1].toLowerCase()
-      if (originator.toLowerCase() !== clientType) {
+      const normalizedOriginator = originator.toLowerCase()
+      const compatibleOriginators = {
+        codex_vscode: ['codex_vscode'],
+        codex_cli_rs: ['codex_cli_rs'],
+        codex_exec: ['codex_exec'],
+        codex_sdk_ts: ['codex_sdk_ts', 'codex_exec', 'codex-exec'],
+        'hapi-codex-client': ['hapi-codex-client']
+      }
+      const skipOriginatorAndSessionValidation = ['codex_sdk_ts', 'hapi-codex-client'].includes(
+        clientType
+      )
+
+      if (
+        !skipOriginatorAndSessionValidation &&
+        !compatibleOriginators[clientType]?.includes(normalizedOriginator)
+      ) {
         logger.debug(
           `Codex CLI validation failed - originator mismatch. UA: ${clientType}, originator: ${originator}`
         )
@@ -73,25 +92,29 @@ class CodexCliValidator {
       }
 
       // 4. 检查 session_id - 必须存在且长度大于20
-      if (!sessionId || sessionId.length <= 20) {
+      if (!skipOriginatorAndSessionValidation && (!sessionId || sessionId.length <= 20)) {
         logger.debug(`Codex CLI validation failed - session_id missing or too short: ${sessionId}`)
         return false
       }
 
       // 5. 对于 /openai/responses 和 /azure/response 路径，额外检查 body 中的 instructions 字段
       if (
-        req.path &&
-        (req.path.includes('/openai/responses') || req.path.includes('/azure/response'))
+        requestPath &&
+        (requestPath.includes('/openai/responses') || requestPath.includes('/azure/response'))
       ) {
         if (!req.body || !req.body.instructions) {
-          logger.debug(`Codex CLI validation failed - missing instructions in body for ${req.path}`)
+          logger.debug(
+            `Codex CLI validation failed - missing instructions in body for ${requestPath}`
+          )
           return false
         }
 
         const expectedPrefix =
           'You are Codex, based on GPT-5. You are running as a coding agent in the Codex CLI'
         if (!req.body.instructions.startsWith(expectedPrefix)) {
-          logger.debug(`Codex CLI validation failed - invalid instructions prefix for ${req.path}`)
+          logger.debug(
+            `Codex CLI validation failed - invalid instructions prefix for ${requestPath}`
+          )
           logger.debug(`Expected: "${expectedPrefix}..."`)
           logger.debug(`Received: "${req.body.instructions.substring(0, 100)}..."`)
           return false
