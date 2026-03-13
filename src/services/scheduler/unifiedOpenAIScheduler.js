@@ -1037,14 +1037,26 @@ class UnifiedOpenAIScheduler {
               mappedAccount.accountType
             )
             if (isAvailable) {
-              // 🚀 智能会话续期（续期 unified 映射键，按配置）
-              await this._extendSessionMappingTTL(sessionHash)
-              logger.info(
-                `🎯 Using sticky session account from group: ${mappedAccount.accountId} (${mappedAccount.accountType})`
+              const isQuotaNearLimit = await this._isAccountQuotaNearLimit(
+                mappedAccount.accountId,
+                mappedAccount.accountType
               )
-              // 更新账户的最后使用时间
-              await this.updateAccountLastUsed(mappedAccount.accountId, mappedAccount.accountType)
-              return mappedAccount
+
+              if (isQuotaNearLimit) {
+                logger.info(
+                  `💸 Group sticky account ${mappedAccount.accountId} (${mappedAccount.accountType}) quota usage reached threshold, removing sticky session for ${sessionHash}`
+                )
+                await this._deleteSessionMapping(sessionHash)
+              } else {
+                // 🚀 智能会话续期（续期 unified 映射键，按配置）
+                await this._extendSessionMappingTTL(sessionHash)
+                logger.info(
+                  `🎯 Using sticky session account from group: ${mappedAccount.accountId} (${mappedAccount.accountType})`
+                )
+                // 更新账户的最后使用时间
+                await this.updateAccountLastUsed(mappedAccount.accountId, mappedAccount.accountType)
+                return mappedAccount
+              }
             }
           }
           // 如果账户不可用或不在分组中，删除映射

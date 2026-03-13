@@ -14,7 +14,7 @@ const { authenticateAdmin } = require('../../middleware/auth')
 const logger = require('../../utils/logger')
 const ProxyHelper = require('../../utils/proxyHelper')
 const webhookNotifier = require('../../utils/webhookNotifier')
-const { formatAccountExpiry, mapExpiryField } = require('./utils')
+const { formatAccountExpiry, mapExpiryField, withResolvedGroupFields } = require('./utils')
 
 const router = express.Router()
 
@@ -273,7 +273,7 @@ router.get('/', authenticateAdmin, async (req, res) => {
         try {
           const usageStats = await redis.getAccountUsageStats(account.id, 'openai')
           const groupInfos = await fetchAccountGroups(account.id)
-          const formattedAccount = formatAccountExpiry(account)
+          const formattedAccount = withResolvedGroupFields(formatAccountExpiry(account), groupInfos)
           return {
             ...formattedAccount,
             groupInfos,
@@ -286,7 +286,7 @@ router.get('/', authenticateAdmin, async (req, res) => {
         } catch (error) {
           logger.debug(`Failed to get usage stats for OpenAI account ${account.id}:`, error)
           const groupInfos = await fetchAccountGroups(account.id)
-          const formattedAccount = formatAccountExpiry(account)
+          const formattedAccount = withResolvedGroupFields(formatAccountExpiry(account), groupInfos)
           return {
             ...formattedAccount,
             groupInfos,
@@ -346,6 +346,8 @@ router.post('/', authenticateAdmin, async (req, res) => {
       name,
       description: description || '',
       accountType: accountType || 'shared',
+      groupId,
+      groupIds,
       priority: priority || 50,
       rateLimitDuration:
         rateLimitDuration !== undefined && rateLimitDuration !== null ? rateLimitDuration : 60,
@@ -386,16 +388,22 @@ router.post('/', authenticateAdmin, async (req, res) => {
           }
         }
 
+        const refreshedGroupInfos = await accountGroupService.getAccountGroups(tempAccount.id)
+        const responseAccount = withResolvedGroupFields(refreshedAccount, refreshedGroupInfos)
+
         // 清除敏感信息后返回
-        delete refreshedAccount.idToken
-        delete refreshedAccount.accessToken
-        delete refreshedAccount.refreshToken
+        delete responseAccount.idToken
+        delete responseAccount.accessToken
+        delete responseAccount.refreshToken
 
         logger.success(`创建并验证 OpenAI 账户成功: ${name} (ID: ${tempAccount.id})`)
 
         return res.json({
           success: true,
-          data: refreshedAccount,
+          data: {
+            ...responseAccount,
+            groupInfos: refreshedGroupInfos
+          },
           message: '账户创建成功，并已获取完整 token 信息'
         })
       } catch (refreshError) {
@@ -461,9 +469,15 @@ router.post('/', authenticateAdmin, async (req, res) => {
 
     logger.success(`创建 OpenAI 账户成功: ${name} (ID: ${createdAccount.id})`)
 
+    const createdGroupInfos = await accountGroupService.getAccountGroups(createdAccount.id)
+    const responseAccount = withResolvedGroupFields(createdAccount, createdGroupInfos)
+
     return res.json({
       success: true,
-      data: createdAccount
+      data: {
+        ...responseAccount,
+        groupInfos: createdGroupInfos
+      }
     })
   } catch (error) {
     logger.error('创建 OpenAI 账户失败:', error)
@@ -600,6 +614,15 @@ router.put('/:id', authenticateAdmin, async (req, res) => {
       }
     }
 
+    const resolvedGroupIds =
+      mappedUpdates.accountType === 'group'
+        ? Array.isArray(mappedUpdates.groupIds) && mappedUpdates.groupIds.length > 0
+          ? mappedUpdates.groupIds.filter((group) => typeof group === 'string' && group.trim())
+          : mappedUpdates.groupId
+            ? [mappedUpdates.groupId]
+            : []
+        : []
+
     // 处理分组的变更
     if (mappedUpdates.accountType !== undefined) {
       // 如果之前是分组类型，移除所有原分组关联
@@ -626,6 +649,11 @@ router.put('/:id', authenticateAdmin, async (req, res) => {
 
     // 准备更新数据
     const updateData = { ...mappedUpdates }
+
+    if (mappedUpdates.accountType !== undefined) {
+      updateData.groupId = resolvedGroupIds[0] || null
+      updateData.groupIds = resolvedGroupIds.length > 0 ? resolvedGroupIds.join(',') : null
+    }
 
     // 处理敏感数据加密
     if (mappedUpdates.openaiOauth) {
@@ -664,6 +692,8 @@ router.put('/:id', authenticateAdmin, async (req, res) => {
     }
 
     const updatedAccount = await openaiAccountService.updateAccount(id, updateData)
+    const updatedGroupInfos = await accountGroupService.getAccountGroups(id)
+    const responseAccount = withResolvedGroupFields(updatedAccount, updatedGroupInfos)
 
     // 如果需要刷新但不强制成功（非关键更新）
     if (needsImmediateRefresh && !requireRefreshSuccess) {
@@ -677,7 +707,13 @@ router.put('/:id', authenticateAdmin, async (req, res) => {
     }
 
     logger.success(`📝 Admin updated OpenAI account: ${id}`)
-    return res.json({ success: true, data: updatedAccount })
+    return res.json({
+      success: true,
+      data: {
+        ...responseAccount,
+        groupInfos: updatedGroupInfos
+      }
+    })
   } catch (error) {
     logger.error('❌ Failed to update OpenAI account:', error)
     return res.status(500).json({ error: 'Failed to update account', message: error.message })

@@ -71,8 +71,32 @@ function formatAccountExpiry(account) {
   }
 }
 
+/**
+ * 基于真实分组关系回填兼容字段，避免账户哈希中的 groupId/groupIds 漂移。
+ * @param {Object} account - 账户对象
+ * @param {Array} groupInfos - 分组详情数组
+ * @returns {Object} 补齐后的账户对象
+ */
+function withResolvedGroupFields(account, groupInfos = []) {
+  if (!account || typeof account !== 'object') {
+    return account
+  }
+
+  const normalizedGroups = Array.isArray(groupInfos) ? groupInfos.filter(Boolean) : []
+  const resolvedGroupIds = normalizedGroups
+    .map((group) => (typeof group.id === 'string' ? group.id.trim() : ''))
+    .filter(Boolean)
+
+  return {
+    ...account,
+    groupId: resolvedGroupIds[0] || '',
+    groupIds: resolvedGroupIds
+  }
+}
+
 module.exports = {
   normalizeNullableDate,
   mapExpiryField,
-  formatAccountExpiry
+  formatAccountExpiry,
+  withResolvedGroupFields
 }

@@ -113,6 +113,29 @@ function buildCodexUsageSnapshot(accountData) {
   }
 }
 
+function normalizeStoredGroupIds(groupIds, fallbackGroupId = null) {
+  if (Array.isArray(groupIds)) {
+    const normalized = groupIds
+      .filter((groupId) => typeof groupId === 'string')
+      .map((groupId) => groupId.trim())
+      .filter(Boolean)
+    return normalized.length > 0 ? normalized : fallbackGroupId ? [fallbackGroupId] : []
+  }
+
+  if (typeof groupIds === 'string' && groupIds.trim()) {
+    return groupIds
+      .split(',')
+      .map((groupId) => groupId.trim())
+      .filter(Boolean)
+  }
+
+  if (typeof fallbackGroupId === 'string' && fallbackGroupId.trim()) {
+    return [fallbackGroupId.trim()]
+  }
+
+  return []
+}
+
 // 刷新访问令牌
 async function refreshAccessToken(refreshToken, proxy = null) {
   try {
@@ -460,6 +483,7 @@ async function createAccount(accountData) {
     description: accountData.description || '',
     accountType: accountData.accountType || 'shared',
     groupId: accountData.groupId || null,
+    groupIds: normalizeStoredGroupIds(accountData.groupIds, accountData.groupId).join(',') || null,
     priority: accountData.priority || 50,
     rateLimitDuration:
       accountData.rateLimitDuration !== undefined && accountData.rateLimitDuration !== null
