@@ -40,7 +40,7 @@ const config = {
     renewalThresholdMinutes: parseInt(process.env.STICKY_SESSION_RENEWAL_THRESHOLD_MINUTES) || 0,
     // 粘性会话额度切换阈值（百分比），账户日额度使用率达到此值时自动解绑粘性会话并切换账户
     // 设为 0 表示禁用此功能
-    quotaSwitchThresholdPercent: parseInt(process.env.SESSION_QUOTA_SWITCH_THRESHOLD_PERCENT) || 90
+    quotaSwitchThresholdPercent: parseInt(process.env.SESSION_QUOTA_SWITCH_THRESHOLD_PERCENT) || 85
   },
 
   // 🎯 Claude API配置

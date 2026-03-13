@@ -632,7 +632,9 @@ class UnifiedOpenAIScheduler {
       const primaryExpired = primaryResetAt > 0 && primaryResetAt < now
       const primary = primaryExpired ? 0 : usage.primary?.usedPercent
 
-      const secondaryResetAt = usage.secondary?.resetAt ? new Date(usage.secondary.resetAt).getTime() : 0
+      const secondaryResetAt = usage.secondary?.resetAt
+        ? new Date(usage.secondary.resetAt).getTime()
+        : 0
       const secondaryExpired = secondaryResetAt > 0 && secondaryResetAt < now
       const secondary = secondaryExpired ? 0 : usage.secondary?.usedPercent
 
@@ -709,17 +711,28 @@ class UnifiedOpenAIScheduler {
           'codexUsageUpdatedAt',
           'name'
         )
-        const [rawPrimary, rawSecondary, rawPrimaryResetSec, rawSecondaryResetSec, rawUpdatedAt, accountName] = fields
+        const [
+          rawPrimary,
+          rawSecondary,
+          rawPrimaryResetSec,
+          rawSecondaryResetSec,
+          rawUpdatedAt,
+          accountName
+        ] = fields
 
         const now = Date.now()
         const updatedAt = rawUpdatedAt ? new Date(rawUpdatedAt).getTime() : 0
 
         // 如果 updatedAt + resetAfterSeconds 已过期，说明该窗口额度已重置，视为 0
-        const primaryResetAt = updatedAt && rawPrimaryResetSec ? updatedAt + parseFloat(rawPrimaryResetSec) * 1000 : 0
+        const primaryResetAt =
+          updatedAt && rawPrimaryResetSec ? updatedAt + parseFloat(rawPrimaryResetSec) * 1000 : 0
         const primaryExpired = primaryResetAt > 0 && primaryResetAt < now
         const primary = primaryExpired ? 0 : parseFloat(rawPrimary)
 
-        const secondaryResetAt = updatedAt && rawSecondaryResetSec ? updatedAt + parseFloat(rawSecondaryResetSec) * 1000 : 0
+        const secondaryResetAt =
+          updatedAt && rawSecondaryResetSec
+            ? updatedAt + parseFloat(rawSecondaryResetSec) * 1000
+            : 0
         const secondaryExpired = secondaryResetAt > 0 && secondaryResetAt < now
         const secondary = secondaryExpired ? 0 : parseFloat(rawSecondary)
 

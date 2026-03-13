@@ -266,7 +266,11 @@ const handleResponses = async (req, res) => {
       // 同一 key 分发给多个用户时，IP 不同，session 自然隔离
       // 再叠加 instructions 区分同一用户的不同会话上下文
       const keyId = apiKeyData.id || apiKeyData.name || 'default'
-      const clientIp = req.headers['x-real-ip'] || req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || ''
+      const clientIp =
+        req.headers['x-real-ip'] ||
+        req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+        req.ip ||
+        ''
 
       if (req.body?.instructions && typeof req.body.instructions === 'string') {
         fallbackContent = `${keyId}:${clientIp}:${req.body.instructions}`
@@ -577,15 +581,6 @@ const handleResponses = async (req, res) => {
 
       res.status(unauthorizedStatus).json(errorResponse)
       return
-    } else if (upstream.status === 200 || upstream.status === 201) {
-      // 请求成功，检查并移除限流状态
-      const isRateLimited = await unifiedOpenAIScheduler.isAccountRateLimited(accountId)
-      if (isRateLimited) {
-        logger.info(
-          `✅ Removing rate limit for OpenAI account ${accountId} after successful request`
-        )
-        await unifiedOpenAIScheduler.removeAccountRateLimit(accountId, 'openai')
-      }
     }
 
     res.status(upstream.status)
@@ -806,15 +801,6 @@ const handleResponses = async (req, res) => {
           sessionHash,
           rateLimitResetsInSeconds
         )
-      } else if (upstream.status === 200) {
-        // 流式请求成功，检查并移除限流状态
-        const isRateLimited = await unifiedOpenAIScheduler.isAccountRateLimited(accountId)
-        if (isRateLimited) {
-          logger.info(
-            `✅ Removing rate limit for OpenAI account ${accountId} after successful stream`
-          )
-          await unifiedOpenAIScheduler.removeAccountRateLimit(accountId, 'openai')
-        }
       }
 
       res.end()
