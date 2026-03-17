@@ -44,10 +44,12 @@ class CodexCliValidator {
       // - codex_vscode/0.35.0 (Windows 10.0.26100; x86_64) unknown (Cursor; 0.4.10)
       // - codex_cli_rs/0.38.0 (Ubuntu 22.4.0; x86_64) WindowsTerminal
       // - codex_exec/0.89.0 (Mac OS 26.2.0; arm64) xterm-256color (非交互式/脚本模式)
+      // - codex_tui/0.115.0 (Mac OS 15.0.0; arm64) xterm-256color
+      // - codex-tui/0.115.0 (Mac OS 15.0.0; arm64) xterm-256color
       // - codex_sdk_ts/0.114.0 (...) (codex-exec; 0.114.0)
       // - hapi-codex-client/0.114.0 (...) (hapi-codex-client; 1.0.0)
       const codexCliPattern =
-        /^(codex_vscode|codex_cli_rs|codex_exec|codex_sdk_ts|hapi-codex-client)\/[\w.-]+/i
+        /^(codex_vscode|codex_cli_rs|codex_exec|codex_tui|codex-tui|codex_sdk_ts|hapi-codex-client)\/[\w.-]+/i
       const uaMatch = userAgent.match(codexCliPattern)
 
       if (!uaMatch) {
@@ -74,6 +76,8 @@ class CodexCliValidator {
         codex_vscode: ['codex_vscode'],
         codex_cli_rs: ['codex_cli_rs'],
         codex_exec: ['codex_exec'],
+        codex_tui: ['codex_tui', 'codex-tui'],
+        'codex-tui': ['codex_tui', 'codex-tui'],
         codex_sdk_ts: ['codex_sdk_ts', 'codex_exec', 'codex-exec'],
         'hapi-codex-client': ['hapi-codex-client']
       }

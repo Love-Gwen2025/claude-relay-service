@@ -72,6 +72,27 @@ describe('Client validators', () => {
     expect(result.matchedClient).toBe(CLIENT_IDS.CODEX_CLI)
   })
 
+  test('accepts codex-tui traffic as official codex_cli', () => {
+    const req = createReq({
+      userAgent: 'codex-tui/0.115.0 (Mac OS 15.0.0; arm64) xterm-256color',
+      path: '/openai/v1/responses',
+      headers: {
+        originator: 'codex-tui',
+        session_id: 'session_123456789012345678901234567890'
+      },
+      body: {
+        instructions:
+          "You are Codex, based on GPT-5. You are running as a coding agent in the Codex CLI on a user's computer.",
+        model: 'gpt-5-codex'
+      }
+    })
+
+    const result = ClientValidator.validateRequest([CLIENT_IDS.CODEX_CLI], req)
+
+    expect(result.allowed).toBe(true)
+    expect(result.matchedClient).toBe(CLIENT_IDS.CODEX_CLI)
+  })
+
   test('rejects generic script user agents even on allowed paths', () => {
     const req = createReq({
       userAgent: 'curl/8.0',
