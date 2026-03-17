@@ -172,11 +172,33 @@ async function getOpenAIAuthToken(apiKeyData, sessionHash = null, requestedModel
             logger.info(`✅ Token refreshed successfully in route handler`)
           } catch (refreshError) {
             logger.error(`Failed to refresh token for ${account.name}:`, refreshError)
+            // 自动标记账户为异常，避免后续请求继续命中此账户
+            try {
+              await openaiAccountService.markAccountUnauthorized(
+                result.accountId,
+                `Token refresh failed: ${refreshError.message}`
+              )
+              logger.warn(
+                `🚫 Auto-marked account ${account.name} as unauthorized due to refresh failure`
+              )
+            } catch (markError) {
+              logger.error(`Failed to mark account ${account.name} as unauthorized:`, markError)
+            }
             const error = new Error(`Token expired and refresh failed: ${refreshError.message}`)
             error.statusCode = 403 // Forbidden - 认证失败
             throw error
           }
         } else {
+          // 无 refreshToken，也标记为异常
+          try {
+            await openaiAccountService.markAccountUnauthorized(
+              result.accountId,
+              `Token expired and no refresh token available`
+            )
+            logger.warn(`🚫 Auto-marked account ${account.name} as unauthorized: no refresh token`)
+          } catch (markError) {
+            logger.error(`Failed to mark account ${account.name} as unauthorized:`, markError)
+          }
           const error = new Error(
             `Token expired and no refresh token available for account ${account.name}`
           )
@@ -966,3 +988,4 @@ router.get('/key-info', authenticateApiKey, async (req, res) => {
 module.exports = router
 module.exports.handleResponses = handleResponses
 module.exports.CODEX_CLI_INSTRUCTIONS = CODEX_CLI_INSTRUCTIONS
+module.exports.getOpenAIAuthToken = getOpenAIAuthToken
